@@ -1,27 +1,11 @@
 
 #!/usr/bin/env python3
-"""
-SMART MANNEQUIN - LoRa P2P TRANSMITTER
-RAK3272S + ROS 2 Jazzy
-
-35 parameter:
-- Arduino UNO Q: 23 parameter
-- Cosmic Aurora V3: 12 parameter
-
-Features:
-- Real sensor data priority
-- Dummy fallback for missing parameters
-- Quality: valid / stale / simulated
-- JSON envelope + CRC16
-- Fragmentation
-- AT+PSEND sequential transmission
-- Wait for TXP2P DONE
-- Automatic RAK reconnect
-"""
 
 import json
-import time
+import math
 import random
+import time
+import threading
 from collections import deque
 
 import serial
@@ -32,15 +16,48 @@ from std_msgs.msg import String
 
 
 # ============================================================
-# 35 EXPECTED PARAMETERS
+# KONFIGURASI RAK LORA
+# ============================================================
+
+SERIAL_PORT = "/dev/ttyAMA3"
+BAUD_RATE = 115200
+
+FREQUENCY = 923200000
+SPREADING_FACTOR = 6
+BANDWIDTH = 2
+CODING_RATE = 0
+PREAMBLE = 8
+TX_POWER = 20
+
+TRANSMIT_INTERVAL = 1.0
+
+# Maksimal data per fragment.
+CHUNK_SIZE = 185
+
+# Maksimal payload AT+PSEND.
+MAX_PAYLOAD = 255
+
+# Jika True, nilai sensor terakhir tetap digunakan ketika
+# data sensor tidak diperbarui.
+HOLD_LAST_VALUE = True
+
+# Jika True, parameter yang belum diterima akan diisi dummy.
+ENABLE_DUMMY_DATA = True
+
+
+# ============================================================
+# URUTAN 35 PARAMETER
+# JANGAN MENGUBAH URUTAN INI TANPA MENGUBAH RECEIVER
 # ============================================================
 
 EXPECTED_KEYS = [
-    # Arduino UNO Q (23)
+    # Arduino UNO Q (23 parameter)
     "lidar_raw",
+
     "mq_nh3",
     "mq_co",
     "mq_co2",
+
     "smoke",
 
     "mpu_acc_x_raw",
@@ -67,7 +84,7 @@ EXPECTED_KEYS = [
     "adxl_acc_y_kalman",
     "adxl_acc_z_kalman",
 
-    # Cosmic Aurora V3 (12)
+    # Cosmic Aurora (12 parameter)
     "accelx",
     "accely",
     "accelz",
@@ -87,22 +104,101 @@ EXPECTED_KEYS = [
 
 
 # ============================================================
-# CRC16 CCITT
+# DUMMY DATA
+# Digunakan ketika parameter belum diterima dari sensor.
+# Nilai ini hanya data simulasi, bukan hasil pengukuran.
+# ============================================================
+
+DUMMY_VALUES = {
+    # Arduino UNO Q
+    "lidar_raw": 120.0,
+
+    "mq_nh3": 12.5,
+    "mq_co": 3.2,
+    "mq_co2": 400.0,
+
+    "smoke": 1.0,
+
+    "mpu_acc_x_raw": 0.12,
+    "mpu_acc_y_raw": 0.15,
+    "mpu_acc_z_raw": 9.81,
+
+    "mpu_gyro_x_raw": 0.01,
+    "mpu_gyro_y_raw": 0.02,
+    "mpu_gyro_z_raw": 0.03,
+
+    "mpu_acc_x_kalman": 0.11,
+    "mpu_acc_y_kalman": 0.14,
+    "mpu_acc_z_kalman": 9.79,
+
+    "mpu_gyro_x_kalman": 0.01,
+    "mpu_gyro_y_kalman": 0.02,
+    "mpu_gyro_z_kalman": 0.03,
+
+    "adxl_acc_x_raw": 0.12,
+    "adxl_acc_y_raw": 0.15,
+    "adxl_acc_z_raw": 9.80,
+
+    "adxl_acc_x_kalman": 0.11,
+    "adxl_acc_y_kalman": 0.14,
+    "adxl_acc_z_kalman": 9.78,
+
+    # Cosmic Aurora
+    "accelx": 0.25,
+    "accely": 0.31,
+    "accelz": 9.72,
+
+    "gyrox": 0.01,
+    "gyroy": 0.02,
+    "gyroz": 0.03,
+
+    "bme_temp": 28.5,
+    "bme_hum": 65.2,
+    "bme_pres": 1008.5,
+    "bme_alt": 120.0,
+
+    "sound_dbLeft": 42.5,
+    "sound_dbRight": 43.1,
+}
+
+
+# ============================================================
+# ALIAS COSMIC AURORA
+# Menyesuaikan nama JSON ESP32 dengan nama parameter.
+# ============================================================
+
+AURORA_ALIASES = {
+    "accel_x": "accelx",
+    "accel_y": "accely",
+    "accel_z": "accelz",
+
+    "gyro_x": "gyrox",
+    "gyro_y": "gyroy",
+    "gyro_z": "gyroz",
+
+    "temperature": "bme_temp",
+    "humidity": "bme_hum",
+    "pressure": "bme_pres",
+    "altitude": "bme_alt",
+
+    "sound_left": "sound_dbLeft",
+    "sound_right": "sound_dbRight",
+}
+
+
+# ============================================================
+# CRC16-CCITT
 # ============================================================
 
 def crc16_ccitt(data: bytes) -> int:
-
     crc = 0xFFFF
 
     for byte in data:
-
         crc ^= byte << 8
 
         for _ in range(8):
-
             if crc & 0x8000:
                 crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-
             else:
                 crc = (crc << 1) & 0xFFFF
 
@@ -110,1127 +206,563 @@ def crc16_ccitt(data: bytes) -> int:
 
 
 # ============================================================
-# HORIZONTAL LOG FORMAT
+# VALIDASI NILAI NUMERIK
 # ============================================================
 
-def format_horizontal(data):
+def valid_number(value):
+    if isinstance(value, bool):
+        return None
 
-    g = lambda key: data.get(key, "-")
+    try:
+        number = float(value)
 
-    parts = [
+        if not math.isfinite(number):
+            return None
 
-        f"Lidar:{g('lidar_raw')}",
+        return number
 
-        f"MQ(NH3:{g('mq_nh3')},"
-        f"CO:{g('mq_co')},"
-        f"CO2:{g('mq_co2')})",
-
-        f"Smoke:{g('smoke')}",
-
-        f"MPU_Raw[A:({g('mpu_acc_x_raw')},"
-        f"{g('mpu_acc_y_raw')},"
-        f"{g('mpu_acc_z_raw')}) "
-        f"G:({g('mpu_gyro_x_raw')},"
-        f"{g('mpu_gyro_y_raw')},"
-        f"{g('mpu_gyro_z_raw')})]",
-
-        f"MPU_Klm[A:({g('mpu_acc_x_kalman')},"
-        f"{g('mpu_acc_y_kalman')},"
-        f"{g('mpu_acc_z_kalman')}) "
-        f"G:({g('mpu_gyro_x_kalman')},"
-        f"{g('mpu_gyro_y_kalman')},"
-        f"{g('mpu_gyro_z_kalman')})]",
-
-        f"ADXL_Raw:({g('adxl_acc_x_raw')},"
-        f"{g('adxl_acc_y_raw')},"
-        f"{g('adxl_acc_z_raw')})",
-
-        f"ADXL_Klm:({g('adxl_acc_x_kalman')},"
-        f"{g('adxl_acc_y_kalman')},"
-        f"{g('adxl_acc_z_kalman')})",
-
-        f"LSM6DS3[A:({g('accelx')},"
-        f"{g('accely')},"
-        f"{g('accelz')}) "
-        f"G:({g('gyrox')},"
-        f"{g('gyroy')},"
-        f"{g('gyroz')})]",
-
-        f"BME280({g('bme_temp')}C,"
-        f"{g('bme_hum')}%,"
-        f"{g('bme_pres')}hPa,"
-        f"{g('bme_alt')}m)",
-
-        f"Sound(L:{g('sound_dbLeft')},"
-        f"R:{g('sound_dbRight')}dB)",
-    ]
-
-    return " | ".join(parts)
+    except (ValueError, TypeError):
+        return None
 
 
 # ============================================================
-# NODE
+# NODE ROS2
 # ============================================================
 
 class LoRaTransmitterNode(Node):
 
     def __init__(self):
-
         super().__init__("lora_transmitter_node")
 
-        # ----------------------------------------------------
-        # GENERAL PARAMETERS
-        # ----------------------------------------------------
+        self.lock = threading.Lock()
 
-        self.declare_parameter("port", "/dev/ttyAMA3")
-        self.declare_parameter("baudrate", 115200)
-
-        self.declare_parameter("interval", 1.0)
-        self.declare_parameter("stale_timeout", 3.0)
-        self.declare_parameter("hold_last", True)
-
-        # Dummy fallback
-        self.declare_parameter("dummy_enabled", True)
-
-        # ----------------------------------------------------
-        # FRAGMENTATION
-        # ----------------------------------------------------
-
-        self.declare_parameter("chunk_size", 185)
-        self.declare_parameter("append_crc", True)
-
-        self.declare_parameter("tx_timeout", 1.5)
-        self.declare_parameter("max_payload", 255)
-
-        # ----------------------------------------------------
-        # RADIO P2P CONFIGURATION
-        # ----------------------------------------------------
-
-        self.declare_parameter("configure_radio", True)
-
-        self.declare_parameter("freq", 923200000)
-        self.declare_parameter("sf", 6)
-        self.declare_parameter("bw", 2)
-        self.declare_parameter("cr", 0)
-
-        self.declare_parameter("preamble", 8)
-        self.declare_parameter("tx_power", 20)
-
-        # ----------------------------------------------------
-        # READ PARAMETERS
-        # ----------------------------------------------------
-
-        gp = lambda name: self.get_parameter(name).value
-
-        self.port = gp("port")
-        self.baud = int(gp("baudrate"))
-
-        self.interval = float(gp("interval"))
-        self.stale_timeout = float(gp("stale_timeout"))
-
-        self.hold_last = bool(gp("hold_last"))
-        self.dummy_enabled = bool(gp("dummy_enabled"))
-
-        self.chunk_size = int(gp("chunk_size"))
-        self.append_crc = bool(gp("append_crc"))
-
-        self.tx_timeout = float(gp("tx_timeout"))
-        self.max_payload = int(gp("max_payload"))
-
-        # ----------------------------------------------------
-        # SOURCE STATE
-        # ----------------------------------------------------
-
-        self.packet_seq = 0
-        self.start_time = time.monotonic()
-
-        self.sources = {
-
-            "arduino": {
-                "raw": None,
-                "received_at": None
-            },
-
-            "aurora": {
-                "raw": None,
-                "received_at": None
-            }
-
-        }
-
-        # ----------------------------------------------------
-        # SERIAL STATE
-        # ----------------------------------------------------
-
-        self.ser = None
-
-        self.rx_buffer = ""
-
-        self.last_reconnect_try = 0.0
-
-        # ----------------------------------------------------
-        # TX QUEUE
-        # ----------------------------------------------------
+        self.latest_values = {}
+        self.last_values = {}
 
         self.tx_queue = deque()
 
-        self.tx_busy = False
+        self.serial_port = None
+        self.tx_active = False
 
-        self.tx_started_at = 0.0
-
-        self.next_send_at = 0.0
-
-        self.cur_msg = None
+        self.last_transmit_time = 0.0
 
         # ----------------------------------------------------
-        # CONNECT RAK
+        # ROS2 SUBSCRIBERS
         # ----------------------------------------------------
 
-        if self.connect_rak(self.port, self.baud):
-
-            if bool(gp("configure_radio")):
-
-                if not self.init_radio():
-
-                    self.get_logger().error(
-                        "Radio initialization failed"
-                    )
-
-        # ----------------------------------------------------
-        # ROS SUBSCRIPTIONS
-        # ----------------------------------------------------
-
-        self.create_subscription(
+        self.arduino_sub = self.create_subscription(
             String,
             "/telemetri/arduino",
-            lambda msg: self.source_callback("arduino", msg),
+            self.arduino_callback,
             10
         )
 
-        self.create_subscription(
+        self.aurora_sub = self.create_subscription(
             String,
             "/telemetri/aurora",
-            lambda msg: self.source_callback("aurora", msg),
+            self.aurora_callback,
             10
         )
 
         # ----------------------------------------------------
-        # TIMERS
+        # TIMER
         # ----------------------------------------------------
 
-        self.create_timer(
-            0.005,
-            self.read_rak_response
+        self.transmit_timer = self.create_timer(
+            TRANSMIT_INTERVAL,
+            self.transmit_callback
         )
 
-        self.create_timer(
-            0.005,
-            self.pump_queue
+        self.queue_timer = self.create_timer(
+            0.01,
+            self.process_queue
         )
 
-        self.create_timer(
-            self.interval,
-            self.transmit
-        )
+        # ----------------------------------------------------
+        # SERIAL INITIALIZATION
+        # ----------------------------------------------------
 
-        self.get_logger().info(
-            "LoRa transmitter started | "
-            f"Interval={self.interval}s | "
-            f"Dummy={self.dummy_enabled} | "
-            f"Chunk={self.chunk_size}B"
-        )
+        self.initialize_serial()
 
     # ========================================================
-    # DUMMY GENERATOR
+    # SERIAL INITIALIZATION
     # ========================================================
 
-    def generate_dummy_parameters(self, seq):
-
-        rng = random.Random(seq)
-
-        return {
-
-            # Arduino UNO Q - 23
-
-            "lidar_raw": round(rng.uniform(50, 200), 2),
-
-            "mq_nh3": round(rng.uniform(5, 30), 2),
-            "mq_co": round(rng.uniform(1, 15), 2),
-            "mq_co2": round(rng.uniform(350, 900), 2),
-
-            "smoke": round(rng.uniform(0, 100), 2),
-
-            "mpu_acc_x_raw": round(rng.uniform(-2, 2), 3),
-            "mpu_acc_y_raw": round(rng.uniform(-2, 2), 3),
-            "mpu_acc_z_raw": round(rng.uniform(8, 11), 3),
-
-            "mpu_gyro_x_raw": round(rng.uniform(-180, 180), 3),
-            "mpu_gyro_y_raw": round(rng.uniform(-180, 180), 3),
-            "mpu_gyro_z_raw": round(rng.uniform(-180, 180), 3),
-
-            "mpu_acc_x_kalman": round(rng.uniform(-2, 2), 3),
-            "mpu_acc_y_kalman": round(rng.uniform(-2, 2), 3),
-            "mpu_acc_z_kalman": round(rng.uniform(8, 11), 3),
-
-            "mpu_gyro_x_kalman": round(rng.uniform(-180, 180), 3),
-            "mpu_gyro_y_kalman": round(rng.uniform(-180, 180), 3),
-            "mpu_gyro_z_kalman": round(rng.uniform(-180, 180), 3),
-
-            "adxl_acc_x_raw": round(rng.uniform(-2, 2), 3),
-            "adxl_acc_y_raw": round(rng.uniform(-2, 2), 3),
-            "adxl_acc_z_raw": round(rng.uniform(8, 11), 3),
-
-            "adxl_acc_x_kalman": round(rng.uniform(-2, 2), 3),
-            "adxl_acc_y_kalman": round(rng.uniform(-2, 2), 3),
-            "adxl_acc_z_kalman": round(rng.uniform(8, 11), 3),
-
-            # Cosmic Aurora - 12
-
-            "accelx": round(rng.uniform(-2, 2), 3),
-            "accely": round(rng.uniform(-2, 2), 3),
-            "accelz": round(rng.uniform(8, 11), 3),
-
-            "gyrox": round(rng.uniform(-180, 180), 3),
-            "gyroy": round(rng.uniform(-180, 180), 3),
-            "gyroz": round(rng.uniform(-180, 180), 3),
-
-            "bme_temp": round(rng.uniform(25, 35), 2),
-            "bme_hum": round(rng.uniform(40, 80), 2),
-            "bme_pres": round(rng.uniform(990, 1020), 2),
-            "bme_alt": round(rng.uniform(0, 100), 2),
-
-            "sound_dbLeft": round(rng.uniform(30, 80), 2),
-            "sound_dbRight": round(rng.uniform(30, 80), 2),
-
-        }
-
-    # ========================================================
-    # AURORA ALIASES
-    # ========================================================
-
-    @staticmethod
-    def normalize_source_data(data):
-
-        if not isinstance(data, dict):
-            return data
-
-        aliases = {
-
-            "accel_x": "accelx",
-            "accel_y": "accely",
-            "accel_z": "accelz",
-
-            "gyro_x": "gyrox",
-            "gyro_y": "gyroy",
-            "gyro_z": "gyroz",
-
-            "temperature": "bme_temp",
-            "humidity": "bme_hum",
-            "pressure": "bme_pres",
-            "altitude": "bme_alt",
-
-            "sound_left": "sound_dbLeft",
-            "sound_right": "sound_dbRight",
-
-        }
-
-        normalized = dict(data)
-
-        for old_key, new_key in aliases.items():
-
-            if old_key in data and new_key not in normalized:
-
-                normalized[new_key] = data[old_key]
-
-        return normalized
-
-    # ========================================================
-    # SERIAL CONNECTION
-    # ========================================================
-
-    def connect_rak(self, port, baud):
+    def initialize_serial(self):
 
         try:
-
-            self.ser = serial.Serial(
-                port=port,
-                baudrate=baud,
-                timeout=0,
-                write_timeout=0.2
+            self.serial_port = serial.Serial(
+                port=SERIAL_PORT,
+                baudrate=BAUD_RATE,
+                timeout=0.1,
+                write_timeout=1
             )
+
+            time.sleep(1)
+
+            self.serial_port.reset_input_buffer()
+            self.serial_port.reset_output_buffer()
 
             self.get_logger().info(
-                f"RAK connected: {port} @ {baud}"
+                f"RAK connected: {SERIAL_PORT}"
             )
 
-            return True
+            self.configure_rak()
 
-        except (serial.SerialException, OSError) as exc:
-
-            self.ser = None
+        except Exception as error:
 
             self.get_logger().error(
-                f"RAK connection failed: {exc}"
+                f"RAK connection failed: {error}"
+            )
+
+            self.serial_port = None
+
+    # ========================================================
+    # SEND AT COMMAND
+    # ========================================================
+
+    def send_at(self, command, timeout=2.0):
+
+        if self.serial_port is None:
+            return False
+
+        try:
+            self.serial_port.reset_input_buffer()
+
+            self.serial_port.write(
+                (command + "\r\n").encode()
+            )
+
+            self.serial_port.flush()
+
+            start_time = time.time()
+            response = ""
+
+            while time.time() - start_time < timeout:
+
+                if self.serial_port.in_waiting:
+
+                    data = self.serial_port.read(
+                        self.serial_port.in_waiting
+                    )
+
+                    response += data.decode(
+                        errors="ignore"
+                    )
+
+                    if "ERROR" in response:
+                        self.get_logger().error(
+                            f"AT error: {command} | {response.strip()}"
+                        )
+                        return False
+
+                    if "OK" in response:
+                        self.get_logger().info(
+                            f"AT OK: {command}"
+                        )
+                        return True
+
+                time.sleep(0.05)
+
+            self.get_logger().warning(
+                f"AT timeout: {command} | {response.strip()}"
+            )
+
+            return False
+
+        except Exception as error:
+
+            self.get_logger().error(
+                f"AT command failed: {error}"
             )
 
             return False
 
     # ========================================================
-    # RECONNECT
+    # CONFIGURE RAK
     # ========================================================
 
-    def try_reconnect(self):
+    def configure_rak(self):
 
-        now = time.monotonic()
-
-        if now - self.last_reconnect_try < 3.0:
+        if self.serial_port is None:
             return
 
-        self.last_reconnect_try = now
-
-        if self.ser is not None:
-
-            try:
-                self.ser.close()
-            except Exception:
-                pass
-
-            self.ser = None
-
-        self.get_logger().warning(
-            "Attempting RAK reconnect..."
+        self.get_logger().info(
+            "Configuring RAK LoRa P2P..."
         )
 
-        if self.connect_rak(self.port, self.baud):
-
-            self.reset_tx_state()
-
-            self.rx_buffer = ""
-
-            if bool(
-                self.get_parameter("configure_radio").value
-            ):
-
-                self.init_radio()
-
-    def reset_tx_state(self):
-
-        self.tx_queue.clear()
-
-        self.tx_busy = False
-
-        self.cur_msg = None
-
-    # ========================================================
-    # AT COMMAND
-    # ========================================================
-
-    def send_at(self, cmd, timeout=1.5):
-
-        self.ser.reset_input_buffer()
-
-        self.ser.write(
-            (cmd + "\r\n").encode("ascii")
-        )
-
-        self.ser.flush()
-
-        start = time.monotonic()
-
-        responses = []
-
-        buf = ""
-
-        while time.monotonic() - start < timeout:
-
-            n = self.ser.in_waiting
-
-            if n > 0:
-
-                buf += self.ser.read(n).decode(
-                    "ascii",
-                    errors="ignore"
-                )
-
-                while "\n" in buf:
-
-                    line, buf = buf.split("\n", 1)
-
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    responses.append(line)
-
-                    if (
-                        "OK" in line
-                        or "AT_ERROR" in line
-                        or "AT_PARAM_ERROR" in line
-                    ):
-
-                        return responses
-
-            time.sleep(0.02)
-
-        return responses
-
-    @staticmethod
-    def has_ok(lines):
-
-        return any(
-            "OK" in line
-            for line in lines
-        )
-
-    # ========================================================
-    # RADIO INITIALIZATION
-    # ========================================================
-
-    def init_radio(self):
-
-        log = self.get_logger()
-
-        log.info("Initializing RAK3272S...")
-
-        if not self.has_ok(
-            self.send_at("AT", 1.0)
-        ):
-
-            time.sleep(0.5)
-
-            if not self.has_ok(
-                self.send_at("AT", 1.0)
-            ):
-
-                log.error(
-                    "RAK does not respond to AT"
-                )
-
-                return False
-
-        log.info("RAK AT OK")
-
-        res = self.send_at(
-            "AT+NWM=?",
-            1.0
-        )
-
-        mode = None
-
-        for line in res:
-
-            if "AT+NWM=" in line:
-
-                mode = line.split("=")[-1].strip()
-
-        if mode != "0":
-
-            log.warning(
-                "Changing RAK to P2P mode..."
-            )
-
-            self.ser.write(
-                b"AT+NWM=0\r\n"
-            )
-
-            self.ser.flush()
-
-            time.sleep(2.5)
-
-            self.ser.reset_input_buffer()
-
-            if not self.has_ok(
-                self.send_at("AT", 1.0)
-            ):
-
-                log.error(
-                    "Failed to initialize P2P mode"
-                )
-
-                return False
-
-        self.send_at(
+        commands = [
+            "AT",
+            "AT+NWM=0",
             "AT+PRECV=0",
-            0.5
-        )
+            (
+                f"AT+P2P={FREQUENCY}:"
+                f"{SPREADING_FACTOR}:"
+                f"{BANDWIDTH}:"
+                f"{CODING_RATE}:"
+                f"{PREAMBLE}:"
+                f"{TX_POWER}"
+            ),
+        ]
 
-        gp = lambda name: int(
-            self.get_parameter(name).value
-        )
+        for command in commands:
 
-        cmd = (
-            f"AT+P2P={gp('freq')}:"
-            f"{gp('sf')}:"
-            f"{gp('bw')}:"
-            f"{gp('cr')}:"
-            f"{gp('preamble')}:"
-            f"{gp('tx_power')}"
-        )
+            result = self.send_at(command)
 
-        log.info(
-            f"Setting radio: {cmd}"
-        )
+            if not result:
+                self.get_logger().warning(
+                    f"Configuration command not confirmed: {command}"
+                )
 
-        res = self.send_at(
-            cmd,
-            1.5
-        )
+            time.sleep(0.2)
 
-        if not self.has_ok(res):
-
-            log.error(
-                f"Failed to configure P2P: {res}"
-            )
-
-            return False
-
-        log.info(
-            "RAK P2P configuration: "
-            + " ".join(
-                self.send_at("AT+P2P=?", 1.0)
-            )
-        )
-
-        log.info(
-            "RAK3272S ready to transmit"
-        )
-
-        return True
-
-    # ========================================================
-    # ROS CALLBACK
-    # ========================================================
-
-    def source_callback(self, name, msg):
-
-        self.sources[name]["raw"] = msg.data
-
-        self.sources[name]["received_at"] = (
-            time.monotonic()
+        self.get_logger().info(
+            "RAK configuration sequence completed."
         )
 
     # ========================================================
-    # BUILD COMPLETE PACKET WITH DUMMY FALLBACK
+    # PARSE JSON INPUT
     # ========================================================
 
-    def build_packet(self):
+    def parse_json(self, raw_data):
 
-        now = time.monotonic()
+        try:
+            data = json.loads(raw_data)
 
-        sources_payload = {}
+            if isinstance(data, dict):
+                return data
 
-        merged = {}
+            return None
 
-        quality = {}
+        except (json.JSONDecodeError, TypeError):
+            return None
 
-        have_any = False
+    # ========================================================
+    # UPDATE SENSOR DATA
+    # ========================================================
 
-        for name, src in self.sources.items():
+    def update_values(self, data, aliases=None):
 
-            raw = src["raw"]
+        if not isinstance(data, dict):
+            return
 
-            ts = src["received_at"]
+        aliases = aliases or {}
 
-            if raw is None or ts is None:
+        with self.lock:
 
-                sources_payload[name] = {
-                    "available": False,
-                    "age_ms": None,
-                    "data": None
-                }
+            for original_key, value in data.items():
 
-                continue
-
-            age_ms = int(
-                (now - ts) * 1000
-            )
-
-            fresh = (
-                now - ts
-            ) <= self.stale_timeout
-
-            if not fresh and not self.hold_last:
-
-                sources_payload[name] = {
-                    "available": False,
-                    "age_ms": age_ms,
-                    "data": None
-                }
-
-                continue
-
-            try:
-
-                data = json.loads(raw)
-
-            except (ValueError, TypeError):
-
-                data = None
-
-            if not isinstance(data, dict):
-
-                sources_payload[name] = {
-                    "available": False,
-                    "age_ms": age_ms,
-                    "data": None
-                }
-
-                continue
-
-            data = self.normalize_source_data(data)
-
-            valid_fields = {}
-
-            for key, value in data.items():
+                key = aliases.get(
+                    original_key,
+                    original_key
+                )
 
                 if key not in EXPECTED_KEYS:
                     continue
 
-                if value is None or isinstance(value, bool):
+                number = valid_number(value)
+
+                if number is None:
                     continue
 
-                if not isinstance(value, (int, float)):
-                    continue
+                self.latest_values[key] = number
+                self.last_values[key] = number
 
-                merged[key] = value
+    # ========================================================
+    # ARDUINO CALLBACK
+    # ========================================================
 
-                quality[key] = (
-                    "valid" if fresh else "stale"
-                )
+    def arduino_callback(self, msg):
 
-                valid_fields[key] = value
+        data = self.parse_json(msg.data)
 
-            if valid_fields:
-                have_any = True
+        if data is None:
 
-            sources_payload[name] = {
-                "available": fresh,
-                "age_ms": age_ms,
-                "data": data
-            }
+            self.get_logger().warning(
+                "Arduino message is not a valid JSON object."
+            )
 
-        # ----------------------------------------------------
-        # NO DATA + DUMMY DISABLED
-        # ----------------------------------------------------
+            return
 
-        if not have_any and not self.dummy_enabled:
+        self.update_values(data)
 
-            return None, None
+    # ========================================================
+    # COSMIC AURORA CALLBACK
+    # ========================================================
 
-        next_seq = self.packet_seq + 1
+    def aurora_callback(self, msg):
 
-        # ----------------------------------------------------
-        # DUMMY FALLBACK
-        # ----------------------------------------------------
+        data = self.parse_json(msg.data)
 
-        dummy_values = self.generate_dummy_parameters(
-            next_seq
+        if data is None:
+
+            self.get_logger().warning(
+                "Aurora message is not a valid JSON object."
+            )
+
+            return
+
+        self.update_values(
+            data,
+            aliases=AURORA_ALIASES
         )
 
-        dummy_count = 0
+    # ========================================================
+    # GENERATE DUMMY DATA
+    # ========================================================
 
-        if self.dummy_enabled:
+    def generate_dummy_values(self):
 
-            for key in EXPECTED_KEYS:
-
-                if key not in merged:
-
-                    merged[key] = dummy_values[key]
-
-                    quality[key] = "simulated"
-
-                    dummy_count += 1
-
-        # ----------------------------------------------------
-        # COMPLETE PARAMETER OBJECT
-        # ----------------------------------------------------
-
-        parameters = {}
+        dummy = {}
 
         for key in EXPECTED_KEYS:
 
-            parameters[key] = merged.get(key)
+            base_value = DUMMY_VALUES[key]
 
-            if key not in quality:
+            # Berikan variasi kecil pada data simulasi.
+            variation = abs(base_value) * 0.01
 
-                quality[key] = "unavailable"
+            if variation == 0:
+                variation = 0.01
 
-        self.packet_seq = next_seq
+            dummy[key] = round(
+                random.uniform(
+                    base_value - variation,
+                    base_value + variation
+                ),
+                3
+            )
 
-        packet = {
+        return dummy
 
-            "version": 2,
+    # ========================================================
+    # BUILD NUMERIC JSON ARRAY
+    # ========================================================
 
-            "seq": self.packet_seq,
+    def build_packet(self):
 
-            "uptime_ms": int(
-                (now - self.start_time) * 1000
-            ),
+        dummy_values = self.generate_dummy_values()
 
-            "simulation": dummy_count > 0,
+        values = []
 
-            "dummy_count": dummy_count,
+        with self.lock:
 
-            "parameter_count": len(EXPECTED_KEYS),
+            for key in EXPECTED_KEYS:
 
-            "sources": sources_payload,
+                value = None
 
-            "parameters": parameters,
+                if key in self.latest_values:
+                    value = self.latest_values[key]
 
-            "parameter_quality": quality,
+                elif HOLD_LAST_VALUE and key in self.last_values:
+                    value = self.last_values[key]
 
-        }
+                elif ENABLE_DUMMY_DATA:
+                    value = dummy_values[key]
 
+                else:
+                    value = 0.0
+
+                number = valid_number(value)
+
+                if number is None:
+                    number = dummy_values[key]
+
+                values.append(number)
+
+        # JSON hanya berisi angka dalam urutan tetap.
         payload = json.dumps(
-            packet,
+            values,
             separators=(",", ":"),
-            ensure_ascii=True
+            allow_nan=False
         )
 
-        return payload, merged
+        return payload
 
     # ========================================================
-    # PREPARE FRAGMENTS
+    # SPLIT JSON INTO LORA FRAGMENTS
     # ========================================================
 
-    def transmit(self):
+    def fragment_packet(self, payload):
 
-        if self.ser is None or not self.ser.is_open:
+        json_bytes = payload.encode("utf-8")
 
-            self.try_reconnect()
+        # CRC dihitung dari JSON asli.
+        crc = crc16_ccitt(json_bytes)
 
-            return
-
-        if self.tx_queue or self.tx_busy:
-
-            self.get_logger().warning(
-                "Previous TX cycle not finished; skipping cycle"
-            )
-
-            return
-
-        payload, merged = self.build_packet()
-
-        if payload is None:
-
-            self.get_logger().warning(
-                "No telemetry available and dummy disabled"
-            )
-
-            return
-
-        body = payload.encode("utf-8")
-
-        if self.append_crc:
-
-            crc = crc16_ccitt(body)
-
-            body += f"*{crc:04X}".encode("ascii")
+        # CRC ditambahkan setelah JSON.
+        # Receiver harus menghapus 5 byte terakhir (*XXXX)
+        # sebelum melakukan json.loads().
+        complete_data = (
+            json_bytes + f"*{crc:04X}".encode()
+        )
 
         chunks = [
-
-            body[i:i + self.chunk_size]
-
+            complete_data[i:i + CHUNK_SIZE]
             for i in range(
                 0,
-                len(body),
-                self.chunk_size
+                len(complete_data),
+                CHUNK_SIZE
             )
-
         ]
 
         total = len(chunks)
 
-        for idx, chunk in enumerate(
-            chunks,
-            start=1
-        ):
+        fragments = []
 
-            fragment = (
-                f"FRG:{idx}/{total}:".encode("ascii")
-                + chunk
-            )
+        for index, chunk in enumerate(chunks, start=1):
 
-            if len(fragment) > self.max_payload:
+            header = f"FRG:{index}/{total}:".encode()
 
-                self.get_logger().error(
-                    f"Fragment too large: {len(fragment)} bytes"
+            fragment = header + chunk
+
+            if len(fragment) > MAX_PAYLOAD:
+                raise ValueError(
+                    "Fragment exceeds maximum LoRa payload."
                 )
 
-                self.tx_queue.clear()
+            fragments.append(fragment)
 
-                return
-
-            self.tx_queue.append(fragment)
-
-        missing = [
-            key
-            for key in EXPECTED_KEYS
-            if merged.get(key) is None
-        ]
-
-        simulated = [
-            key
-            for key in EXPECTED_KEYS
-            if key in merged
-            and key not in [
-                k for k, v in merged.items()
-                if v is not None
-            ]
-        ]
-
-        self.cur_msg = {
-
-            "seq": self.packet_seq,
-
-            "bytes": len(body),
-
-            "frags": total,
-
-            "t_start": time.monotonic(),
-
-            "line": format_horizontal(merged),
-
-            "missing": missing,
-
-            "count": len([
-                key for key in EXPECTED_KEYS
-                if merged.get(key) is not None
-            ]),
-
-        }
+        return fragments
 
     # ========================================================
-    # PUMP TX QUEUE
+    # TRANSMIT CALLBACK
     # ========================================================
 
-    def pump_queue(self):
+    def transmit_callback(self):
 
-        if (
-            self.ser is None
-            or not self.ser.is_open
-            or not self.tx_queue
-        ):
-
+        if self.serial_port is None:
             return
-
-        now = time.monotonic()
-
-        if self.tx_busy:
-
-            if now - self.tx_started_at > self.tx_timeout:
-
-                self.abort_message(
-                    "TX DONE timeout"
-                )
-
-            return
-
-        if now < self.next_send_at:
-            return
-
-        fragment = self.tx_queue[0]
-
-        command = (
-            "AT+PSEND="
-            + fragment.hex().upper()
-            + "\r\n"
-        )
 
         try:
 
-            self.ser.write(
-                command.encode("ascii")
+            payload = self.build_packet()
+
+            fragments = self.fragment_packet(payload)
+
+            with self.lock:
+
+                for fragment in fragments:
+                    self.tx_queue.append(fragment)
+
+            self.get_logger().info(
+                f"Queued {len(fragments)} fragment(s), "
+                f"{len(payload)} JSON characters."
             )
 
-            self.ser.flush()
-
-            self.tx_busy = True
-
-            self.tx_started_at = now
-
-        except (
-            serial.SerialException,
-            serial.SerialTimeoutException,
-            OSError
-        ) as exc:
+        except Exception as error:
 
             self.get_logger().error(
-                f"LoRa TX error: {exc}"
+                f"Packet creation failed: {error}"
             )
 
-            self.reset_tx_state()
-
-            self.try_reconnect()
-
     # ========================================================
-    # MESSAGE FINISHED
+    # PROCESS TRANSMISSION QUEUE
     # ========================================================
 
-    def finish_message(self):
+    def process_queue(self):
 
-        msg = self.cur_msg
-
-        if msg is None:
+        if self.serial_port is None:
             return
 
-        elapsed = (
-            time.monotonic() - msg["t_start"]
-        ) * 1000
+        if self.tx_active:
+            return
 
-        self.get_logger().info(
+        if not self.tx_queue:
+            return
 
-            f"[TX #{msg['seq']:04d}] "
+        fragment = self.tx_queue.popleft()
 
-            f"[{msg['bytes']}B "
+        self.tx_active = True
 
-            f"{msg['frags']} fragments "
+        try:
 
-            f"{elapsed:.0f}ms] "
+            hex_data = fragment.hex().upper()
 
-            f"[{msg['count']}/35 parameters]"
+            command = f"AT+PSEND={hex_data}"
 
-        )
+            self.serial_port.reset_input_buffer()
 
-        self.get_logger().info(
-            msg["line"]
-        )
-
-        if msg["missing"]:
-
-            self.get_logger().warning(
-                "Unavailable parameters: "
-                + ", ".join(msg["missing"])
+            self.serial_port.write(
+                (command + "\r\n").encode()
             )
 
-        self.cur_msg = None
+            self.serial_port.flush()
+
+            success = self.wait_tx_done(timeout=2.0)
+
+            if success:
+
+                self.get_logger().info(
+                    "LoRa fragment transmitted."
+                )
+
+            else:
+
+                self.get_logger().warning(
+                    "LoRa transmission not confirmed."
+                )
+
+        except Exception as error:
+
+            self.get_logger().error(
+                f"LoRa transmission error: {error}"
+            )
+
+        finally:
+
+            self.tx_active = False
 
     # ========================================================
-    # ABORT MESSAGE
+    # WAIT FOR TX DONE
     # ========================================================
 
-    def abort_message(self, reason):
+    def wait_tx_done(self, timeout=2.0):
 
-        seq = (
-            self.cur_msg["seq"]
-            if self.cur_msg
-            else "?"
-        )
+        start_time = time.time()
+        response = ""
+
+        while time.time() - start_time < timeout:
+
+            if self.serial_port.in_waiting:
+
+                data = self.serial_port.read(
+                    self.serial_port.in_waiting
+                )
+
+                response += data.decode(
+                    errors="ignore"
+                )
+
+                if "+EVT:TXP2P DONE" in response:
+                    return True
+
+                if "ERROR" in response:
+                    self.get_logger().error(
+                        f"RAK response: {response.strip()}"
+                    )
+                    return False
+
+            time.sleep(0.02)
 
         self.get_logger().warning(
-            f"[TX #{seq}] Message aborted: {reason}"
+            f"TX confirmation timeout: {response.strip()}"
         )
 
-        self.reset_tx_state()
+        return False
 
     # ========================================================
-    # READ RAK RESPONSE
-    # ========================================================
-
-    def read_rak_response(self):
-
-        if self.ser is None or not self.ser.is_open:
-            return
-
-        try:
-
-            n = self.ser.in_waiting
-
-            if n <= 0:
-                return
-
-            self.rx_buffer += self.ser.read(n).decode(
-                "ascii",
-                errors="replace"
-            )
-
-            while "\n" in self.rx_buffer:
-
-                line, self.rx_buffer = (
-                    self.rx_buffer.split("\n", 1)
-                )
-
-                line = line.strip()
-
-                if not line:
-                    continue
-
-                if (
-                    "+EVT:TXP2P DONE" in line
-                    or "+EVT:TX_DONE" in line
-                ):
-
-                    if self.tx_busy and self.tx_queue:
-
-                        self.tx_queue.popleft()
-
-                        self.tx_busy = False
-
-                        if not self.tx_queue:
-
-                            self.finish_message()
-
-                elif "AT_BUSY_ERROR" in line:
-
-                    self.tx_busy = False
-
-                    self.next_send_at = (
-                        time.monotonic() + 0.05
-                    )
-
-                elif (
-                    "AT_PARAM_ERROR" in line
-                    or "AT_ERROR" in line
-                ):
-
-                    self.get_logger().error(
-                        f"RAK response: {line}"
-                    )
-
-                    self.abort_message(line)
-
-                else:
-
-                    self.get_logger().debug(
-                        f"RAK response: {line}"
-                    )
-
-            if len(self.rx_buffer) > 4096:
-
-                self.rx_buffer = ""
-
-        except (
-            serial.SerialException,
-            OSError
-        ) as exc:
-
-            self.get_logger().error(
-                f"RAK read error: {exc}"
-            )
-
-            self.try_reconnect()
-
-    # ========================================================
-    # CLEANUP
+    # SHUTDOWN
     # ========================================================
 
     def destroy_node(self):
 
-        if self.ser is not None and self.ser.is_open:
+        if self.serial_port is not None:
 
             try:
-
-                self.ser.write(
-                    b"AT+PRECV=0\r\n"
-                )
-
-                time.sleep(0.1)
-
+                self.serial_port.close()
             except Exception:
                 pass
-
-            self.ser.close()
 
         super().destroy_node()
 
@@ -1246,20 +778,18 @@ def main(args=None):
     node = LoRaTransmitterNode()
 
     try:
-
         rclpy.spin(node)
 
     except KeyboardInterrupt:
-
         pass
 
     finally:
 
         node.destroy_node()
 
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":
-
     main()
