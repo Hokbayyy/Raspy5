@@ -1,0 +1,29 @@
+running egg_info
+writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO
+writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt
+writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt
+writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt
+writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt
+reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+running build
+running build_py
+copying blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+running install
+running install_lib
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/hx711_node.py to hx711_node.cpython-312.pyc
+Sorry: IndentationError: unindent does not match any outer indentation level (hx711_node.py, line 98)
+running install_data
+running install_egg_info
+removing '/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info' (and everything under it)
+Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info
+running install_scripts
+Installing adxl_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing dummy_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing hx711_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing sensor_acquisition script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'

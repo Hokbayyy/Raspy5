@@ -1,0 +1,42 @@
+i2c:
+  enabled: true
+  bus: 1
+  frequency: 100000
+
+  multiplexers:
+    - id: tca_1
+      address: 0x70
+      channels: 8
+
+    - id: tca_2
+      address: 0x71
+      channels: 8
+
+sensors:
+  mcp9808:
+    enabled: true
+    count: 14
+    address: 0x18
+
+    connections:
+      - {id: mcp_j7,  mux: 0x70, channel: 0}
+      - {id: mcp_j8,  mux: 0x70, channel: 1}
+      - {id: mcp_j9,  mux: 0x70, channel: 2}
+      - {id: mcp_j10, mux: 0x70, channel: 3}
+      - {id: mcp_j11, mux: 0x70, channel: 4}
+      - {id: mcp_j12, mux: 0x70, channel: 5}
+      - {id: mcp_j13, mux: 0x70, channel: 6}
+      - {id: mcp_j14, mux: 0x70, channel: 7}
+      - {id: mcp_j15, mux: 0x71, channel: 0}
+      - {id: mcp_j16, mux: 0x71, channel: 1}
+      - {id: mcp_j17, mux: 0x71, channel: 2}
+      - {id: mcp_j18, mux: 0x71, channel: 3}
+      - {id: mcp_j19, mux: 0x71, channel: 4}
+      - {id: mcp_j20, mux: 0x71, channel: 5}
+
+  amg8833:
+    enabled: true
+    address: 0x69
+    connection:
+      mux: 0x71
+      channel: 6

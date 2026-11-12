@@ -1,0 +1,31 @@
+[1.559s] Invoking command in '/home/manekin2/blackbox2_ws/src/blackbox2_core': PS1=(venv) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data
+[1.955s] running egg_info
+[1.981s] writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO
+[1.982s] writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt
+[1.982s] writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt
+[1.983s] writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt
+[1.983s] writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt
+[2.039s] reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[2.041s] writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[2.041s] running build
+[2.041s] running build_py
+[2.041s] copying blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+[2.042s] running install
+[2.050s] running install_lib
+[2.077s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+[2.078s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/hx711_node.py to hx711_node.cpython-312.pyc
+[2.079s] Sorry: IndentationError: unindent does not match any outer indentation level (hx711_node.py, line 98)
+[2.079s] running install_data
+[2.079s] running install_egg_info
+[2.107s] removing '/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info' (and everything under it)
+[2.107s] Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info
+[2.109s] running install_scripts
+[2.165s] Installing adxl_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.165s] Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.165s] Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.165s] Installing dummy_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.166s] Installing hx711_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.166s] Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.166s] Installing sensor_acquisition script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.167s] writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'
+[2.243s] Invoked command in '/home/manekin2/blackbox2_ws/src/blackbox2_core' returned '0': PS1=(venv) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data

@@ -1,0 +1,24 @@
+[1.063s] Invoking command in '/home/manekin2/blackbox2_ws/src/blackbox2_core': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data
+[1.460s] running egg_info
+[1.487s] writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO
+[1.487s] writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt
+[1.488s] writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt
+[1.488s] writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt
+[1.488s] writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt
+[1.546s] reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[1.547s] writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[1.547s] running build
+[1.548s] running build_py
+[1.549s] running install
+[1.556s] running install_lib
+[1.585s] running install_data
+[1.585s] copying launch/telemetry.launch.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+[1.585s] running install_egg_info
+[1.613s] removing '/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info' (and everything under it)
+[1.614s] Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info
+[1.615s] running install_scripts
+[1.672s] Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[1.672s] Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[1.672s] Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[1.673s] writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'
+[1.747s] Invoked command in '/home/manekin2/blackbox2_ws/src/blackbox2_core' returned '0': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data

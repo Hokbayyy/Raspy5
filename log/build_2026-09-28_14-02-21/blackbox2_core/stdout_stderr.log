@@ -1,0 +1,49 @@
+running egg_info
+creating ../../build/blackbox2_core/blackbox2_core.egg-info
+writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO
+writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt
+writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt
+writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt
+writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt
+writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+running build
+running build_py
+creating /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/adxl_sensor_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/__init__.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/dummy_sensor.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/cosmic_aurora_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/lora_transmitter_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+copying blackbox2_core/arduino_uno_q_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core
+running install
+running install_lib
+creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/adxl_sensor_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/__init__.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/dummy_sensor.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/cosmic_aurora_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/lora_transmitter_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/arduino_uno_q_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/adxl_sensor_node.py to adxl_sensor_node.cpython-312.pyc
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/__init__.py to __init__.cpython-312.pyc
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/dummy_sensor.py to dummy_sensor.cpython-312.pyc
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/cosmic_aurora_node.py to cosmic_aurora_node.cpython-312.pyc
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/lora_transmitter_node.py to lora_transmitter_node.cpython-312.pyc
+byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/arduino_uno_q_node.py to arduino_uno_q_node.cpython-312.pyc
+running install_data
+creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index/resource_index/packages
+copying resource/blackbox2_core -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index/resource_index/packages
+copying package.xml -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core
+creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+copying launch/telemetry.launch.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+running install_egg_info
+Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info
+running install_scripts
+Installing adxl_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing dummy_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'

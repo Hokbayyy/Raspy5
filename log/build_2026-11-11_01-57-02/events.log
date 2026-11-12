@@ -1,0 +1,54 @@
+[0.000000] (-) TimerEvent: {}
+[0.000788] (blackbox2_core) JobQueued: {'identifier': 'blackbox2_core', 'dependencies': OrderedDict()}
+[0.001023] (blackbox2_core) JobStarted: {'identifier': 'blackbox2_core'}
+[0.100071] (-) TimerEvent: {}
+[0.200645] (-) TimerEvent: {}
+[0.301075] (-) TimerEvent: {}
+[0.401563] (-) TimerEvent: {}
+[0.501917] (-) TimerEvent: {}
+[0.602256] (-) TimerEvent: {}
+[0.702572] (-) TimerEvent: {}
+[0.802866] (-) TimerEvent: {}
+[0.903154] (-) TimerEvent: {}
+[1.003450] (-) TimerEvent: {}
+[1.103743] (-) TimerEvent: {}
+[1.204089] (-) TimerEvent: {}
+[1.304516] (-) TimerEvent: {}
+[1.406705] (-) TimerEvent: {}
+[1.507075] (-) TimerEvent: {}
+[1.607464] (-) TimerEvent: {}
+[1.707867] (-) TimerEvent: {}
+[1.763729] (blackbox2_core) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'develop', '--editable', '--build-directory', '/home/manekin2/blackbox2_ws/build/blackbox2_core/build', '--no-deps', 'symlink_data'], 'cwd': '/home/manekin2/blackbox2_ws/build/blackbox2_core', 'env': OrderedDict({'LESSOPEN': '| /usr/bin/lesspipe %s', 'USER': 'manekin2', 'SSH_CLIENT': '10.67.164.59 26118 22', 'XDG_SESSION_TYPE': 'tty', 'GIT_ASKPASS': '/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/extensions/git/dist/askpass.sh', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/aarch64-linux-gnu:/opt/ros/jazzy/opt/gz_math_vendor/lib:/opt/ros/jazzy/opt/gz_utils_vendor/lib:/opt/ros/jazzy/opt/gz_cmake_vendor/lib:/opt/ros/jazzy/lib', 'BROWSER': '/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/bin/helpers/browser.sh', 'HOME': '/home/manekin2', 'OLDPWD': '/home/manekin2', 'TERM_PROGRAM_VERSION': '1.145.2', 'VSCODE_IPC_HOOK_CLI': '/run/user/1000/vscode-ipc-0e67d811-83f3-42fc-9869-077de56fba10.sock', 'ROS_PYTHON_VERSION': '3', 'VSCODE_GIT_ASKPASS_MAIN': '/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/extensions/git/dist/askpass-main.js', 'PS1': '\\[\x1b]633;A\x07\\](venv) \\[\x1b]633;A\x07\\]\\[\\e]0;\\u@\\h: \\w\\a\\]${debian_chroot:+($debian_chroot)}\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$ \\[\x1b]633;B\x07\\]\\[\x1b]633;B\x07\\]', 'VSCODE_GIT_ASKPASS_NODE': '/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/node', 'PYDEVD_DISABLE_FILE_VALIDATION': '1', 'BUNDLED_DEBUGPY_PATH': '/home/manekin2/.vscode-server/extensions/ms-python.debugpy-2026.6.0-linux-arm64/bundled/libs/debugpy', 'VSCODE_PYTHON_AUTOACTIVATE_GUARD': '1', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'COLORTERM': 'truecolor', 'COLCON_PREFIX_PATH': '/home/manekin2/blackbox2_ws/install', 'ROS_DISTRO': 'jazzy', 'LOGNAME': 'manekin2', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'XDG_SESSION_CLASS': 'user', 'TERM': 'xterm-256color', 'XDG_SESSION_ID': '3', 'PATH': '/home/manekin2/blackbox2_ws/venv/bin:/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/bin/remote-cli:/opt/ros/jazzy/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin:/home/manekin2/.vscode-server/extensions/ms-python.debugpy-2026.6.0-linux-arm64/bundled/scripts/noConfigScripts:/home/manekin2/.vscode-server/data/User/globalStorage/github.copilot-chat/debugCommand:/home/manekin2/.vscode-server/cli/servers/Stable-c4453f8ea430795f941c1b2ff6c9321135a74a02/server/bin/copilot-shim', 'XDG_RUNTIME_DIR': '/run/user/1000', 'VSCODE_DEBUGPY_ADAPTER_ENDPOINTS': '/home/manekin2/.vscode-server/extensions/ms-python.debugpy-2026.6.0-linux-arm64/.noConfigDebugAdapterEndpoints/endpoint-772aeefe1b57639f.txt', 'LANG': 'en_US.UTF-8', 'PYTHONSTARTUP': '/home/manekin2/.vscode-server/data/User/workspaceStorage/a28937daee7c3d16e13ce3b8416045a4/ms-python.python/pythonrc.py', 'VIRTUAL_ENV_PROMPT': '(venv)', 'LS_COLORS': 'rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=00:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.avif=01;35:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.webp=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:*~=00;90:*#=00;90:*.bak=00;90:*.crdownload=00;90:*.dpkg-dist=00;90:*.dpkg-new=00;90:*.dpkg-old=00;90:*.dpkg-tmp=00;90:*.old=00;90:*.orig=00;90:*.part=00;90:*.rej=00;90:*.rpmnew=00;90:*.rpmorig=00;90:*.rpmsave=00;90:*.swp=00;90:*.tmp=00;90:*.ucf-dist=00;90:*.ucf-new=00;90:*.ucf-old=00;90:', 'VSCODE_GIT_IPC_HANDLE': '/run/user/1000/vscode-git-61840046b3.sock', 'TERM_PROGRAM': 'vscode', 'ROS_DOMAIN_ID': '2', 'AMENT_PREFIX_PATH': '/home/manekin2/blackbox2_ws/install/blackbox2_core:/opt/ros/jazzy', 'SHELL': '/bin/bash', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'VIRTUAL_ENV': '/home/manekin2/blackbox2_ws/venv', 'ROS_AUTOMATIC_DISCOVERY_RANGE': 'SUBNET', 'VSCODE_GIT_ASKPASS_EXTRA_ARGS': '', 'PWD': '/home/manekin2/blackbox2_ws/build/blackbox2_core', 'LC_ALL': 'en_US.UTF-8', 'COPILOT_DEBUG_NONCE': '4d53bf8d022d9fb9e163bc5392152d01', 'SSH_CONNECTION': '10.67.164.59 26118 10.67.164.79 22', 'XDG_DATA_DIRS': '/usr/local/share:/usr/share:/var/lib/snapd/desktop', 'PYTHONPATH': '/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:/home/manekin2/blackbox2_ws/venv/lib/python3.12/site-packages:/home/manekin2/blackbox2_ws/venv/lib/python3.12/site-packages:/home/manekin2/blackbox2_ws/build/blackbox2_core:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:/opt/ros/jazzy/opt/gz_math_vendor/lib/python:/opt/ros/jazzy/lib/python3.12/site-packages', 'COLCON': '1', 'CMAKE_PREFIX_PATH': '/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor'}), 'shell': False}
+[1.807958] (-) TimerEvent: {}
+[1.908289] (-) TimerEvent: {}
+[2.008657] (-) TimerEvent: {}
+[2.108958] (-) TimerEvent: {}
+[2.209278] (-) TimerEvent: {}
+[2.216889] (blackbox2_core) StdoutLine: {'line': b'running develop\n'}
+[2.309380] (-) TimerEvent: {}
+[2.409705] (-) TimerEvent: {}
+[2.506578] (blackbox2_core) StdoutLine: {'line': b'running egg_info\n'}
+[2.509824] (-) TimerEvent: {}
+[2.551014] (blackbox2_core) StdoutLine: {'line': b'writing blackbox2_core.egg-info/PKG-INFO\n'}
+[2.552115] (blackbox2_core) StdoutLine: {'line': b'writing dependency_links to blackbox2_core.egg-info/dependency_links.txt\n'}
+[2.553062] (blackbox2_core) StdoutLine: {'line': b'writing entry points to blackbox2_core.egg-info/entry_points.txt\n'}
+[2.553868] (blackbox2_core) StdoutLine: {'line': b'writing requirements to blackbox2_core.egg-info/requires.txt\n'}
+[2.554749] (blackbox2_core) StdoutLine: {'line': b'writing top-level names to blackbox2_core.egg-info/top_level.txt\n'}
+[2.611505] (-) TimerEvent: {}
+[2.688757] (blackbox2_core) StdoutLine: {'line': b"reading manifest file 'blackbox2_core.egg-info/SOURCES.txt'\n"}
+[2.690266] (blackbox2_core) StdoutLine: {'line': b"writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'\n"}
+[2.714514] (-) TimerEvent: {}
+[2.744326] (blackbox2_core) StdoutLine: {'line': b'running build_ext\n'}
+[2.744672] (blackbox2_core) StdoutLine: {'line': b'Creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2-core.egg-link (link to .)\n'}
+[2.745966] (blackbox2_core) StdoutLine: {'line': b'Installing analog_sensor_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.746993] (blackbox2_core) StdoutLine: {'line': b'Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.747232] (blackbox2_core) StdoutLine: {'line': b'Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.748659] (blackbox2_core) StdoutLine: {'line': b'Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.749014] (blackbox2_core) StdoutLine: {'line': b'Installing mcp9808_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.749146] (blackbox2_core) StdoutLine: {'line': b'\n'}
+[2.749267] (blackbox2_core) StdoutLine: {'line': b'Installed /home/manekin2/blackbox2_ws/build/blackbox2_core\n'}
+[2.749383] (blackbox2_core) StdoutLine: {'line': b'running symlink_data\n'}
+[2.816600] (-) TimerEvent: {}
+[2.887933] (blackbox2_core) CommandEnded: {'returncode': 0}
+[2.903419] (blackbox2_core) JobEnded: {'identifier': 'blackbox2_core', 'rc': 0}
+[2.904471] (-) EventReactorShutdown: {}

@@ -1,0 +1,31 @@
+[1.714s] Invoking command in '/home/manekin2/blackbox2_ws/build/blackbox2_core': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/manekin2/blackbox2_ws/build/blackbox2_core/build --no-deps symlink_data
+[2.164s] running develop
+[2.433s] running egg_info
+[2.434s] creating blackbox2_core.egg-info
+[2.458s] writing blackbox2_core.egg-info/PKG-INFO
+[2.458s] writing dependency_links to blackbox2_core.egg-info/dependency_links.txt
+[2.458s] writing entry points to blackbox2_core.egg-info/entry_points.txt
+[2.459s] writing requirements to blackbox2_core.egg-info/requires.txt
+[2.459s] writing top-level names to blackbox2_core.egg-info/top_level.txt
+[2.459s] writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+[2.511s] reading manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+[2.512s] writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+[2.539s] running build_ext
+[2.539s] Creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2-core.egg-link (link to .)
+[2.540s] Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.540s] Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.540s] Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.540s] 
+[2.541s] Installed /home/manekin2/blackbox2_ws/build/blackbox2_core
+[2.541s] running symlink_data
+[2.541s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index
+[2.541s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index/resource_index
+[2.541s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index/resource_index/packages
+[2.541s] symbolically linking /home/manekin2/blackbox2_ws/build/blackbox2_core/resource/blackbox2_core -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/ament_index/resource_index/packages
+[2.542s] symbolically linking /home/manekin2/blackbox2_ws/build/blackbox2_core/package.xml -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core
+[2.542s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+[2.542s] symbolically linking /home/manekin2/blackbox2_ws/build/blackbox2_core/launch/telemetry.launch.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+[2.542s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/config
+[2.542s] symbolically linking /home/manekin2/blackbox2_ws/build/blackbox2_core/config/sensors.yaml -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/config
+[2.542s] symbolically linking /home/manekin2/blackbox2_ws/build/blackbox2_core/config/devices.yaml -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/config
+[2.627s] Invoked command in '/home/manekin2/blackbox2_ws/build/blackbox2_core' returned '0': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/manekin2/blackbox2_ws/build/blackbox2_core/build --no-deps symlink_data

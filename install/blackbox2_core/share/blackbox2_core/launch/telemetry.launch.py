@@ -1,0 +1,1 @@
+/home/manekin2/blackbox2_ws/build/blackbox2_core/launch/telemetry.launch.py

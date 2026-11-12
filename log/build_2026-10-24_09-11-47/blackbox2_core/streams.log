@@ -1,0 +1,64 @@
+[1.529s] Invoking command in '/home/manekin2/blackbox2_ws/src/blackbox2_core': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data
+[1.934s] running egg_info
+[1.961s] writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO
+[1.961s] writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt
+[1.962s] writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt
+[1.962s] writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt
+[1.962s] writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt
+[2.020s] reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[2.022s] writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'
+[2.022s] running build
+[2.022s] running build_py
+[2.023s] creating /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/transport
+[2.023s] copying blackbox2_core/transport/__init__.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/transport
+[2.023s] copying blackbox2_core/transport/lora_transmitter_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/transport
+[2.024s] creating /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/core
+[2.024s] copying blackbox2_core/core/__init__.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/core
+[2.024s] creating /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors
+[2.024s] copying blackbox2_core/sensors/sensor_acquisition_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors
+[2.024s] copying blackbox2_core/sensors/__init__.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors
+[2.024s] copying blackbox2_core/sensors/sensor_splitter_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors
+[2.025s] creating /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers
+[2.025s] copying blackbox2_core/drivers/hx711_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers
+[2.025s] copying blackbox2_core/drivers/__init__.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers
+[2.025s] copying blackbox2_core/drivers/cosmic_aurora_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers
+[2.025s] copying blackbox2_core/drivers/arduino_uno_q_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers
+[2.026s] running install
+[2.033s] running install_lib
+[2.061s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/transport
+[2.061s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/transport/__init__.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/transport
+[2.061s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/transport/lora_transmitter_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/transport
+[2.062s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/core
+[2.062s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/core/__init__.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/core
+[2.062s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors
+[2.062s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors/sensor_acquisition_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors
+[2.062s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors/__init__.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors
+[2.062s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/sensors/sensor_splitter_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors
+[2.063s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers
+[2.063s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers/hx711_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers
+[2.063s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers/__init__.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers
+[2.063s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers/cosmic_aurora_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers
+[2.063s] copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/drivers/arduino_uno_q_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers
+[2.064s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/transport/__init__.py to __init__.cpython-312.pyc
+[2.065s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/transport/lora_transmitter_node.py to lora_transmitter_node.cpython-312.pyc
+[2.066s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/core/__init__.py to __init__.cpython-312.pyc
+[2.066s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors/sensor_acquisition_node.py to sensor_acquisition_node.cpython-312.pyc
+[2.068s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors/__init__.py to __init__.cpython-312.pyc
+[2.068s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/sensors/sensor_splitter_node.py to sensor_splitter_node.cpython-312.pyc
+[2.069s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers/hx711_node.py to hx711_node.cpython-312.pyc
+[2.070s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers/__init__.py to __init__.cpython-312.pyc
+[2.071s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers/cosmic_aurora_node.py to cosmic_aurora_node.cpython-312.pyc
+[2.072s] byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/drivers/arduino_uno_q_node.py to arduino_uno_q_node.cpython-312.pyc
+[2.073s] running install_data
+[2.073s] copying launch/telemetry.launch.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/launch
+[2.073s] creating /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/config
+[2.074s] copying config/devices.yaml -> /home/manekin2/blackbox2_ws/install/blackbox2_core/share/blackbox2_core/config
+[2.074s] running install_egg_info
+[2.102s] removing '/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info' (and everything under it)
+[2.102s] Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info
+[2.104s] running install_scripts
+[2.161s] Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.161s] Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.161s] Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[2.162s] writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'
+[2.240s] Invoked command in '/home/manekin2/blackbox2_ws/src/blackbox2_core' returned '0': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py egg_info --egg-base ../../build/blackbox2_core build --build-base /home/manekin2/blackbox2_ws/build/blackbox2_core/build install --record /home/manekin2/blackbox2_ws/build/blackbox2_core/install.log --install-scripts $base/lib/blackbox2_core --single-version-externally-managed install_data

@@ -1,0 +1,33 @@
+
+smart_mannequin:
+  ros__parameters:
+    device_id: "manekin2"
+    gateway_id: "raspberry_pi_5"
+
+arduino_uno_q:
+  ros__parameters:
+    enabled: true
+    port: "/dev/ttyAMA10"
+    baudrate: 115200
+    topic: "telemetri/arduino"
+
+cosmic_aurora:
+  ros__parameters:
+    enabled: true
+    port: "/dev/ttyAMA2"
+    baudrate: 115200
+    topic: "telemetri/aurora"
+
+lora_transmitter:
+  ros__parameters:
+    enabled: true
+    port: "/dev/ttyAMA0"
+    baudrate: 115200
+    input_topics:
+      - "telemetri/arduino"
+      - "telemetri/aurora"
+      - "sensors/temperature"
+      - "sensors/loadcell"
+      - "telemetry/piezo"
+      - "telemetry/flex"
+      - "telemetry/fsr"

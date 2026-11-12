@@ -1,0 +1,9 @@
+source;share/blackbox2_core/hook/pythonpath.ps1
+source;share/blackbox2_core/hook/pythonpath.dsv
+source;share/blackbox2_core/hook/pythonpath.sh
+source;share/blackbox2_core/hook/ament_prefix_path.ps1
+source;share/blackbox2_core/hook/ament_prefix_path.dsv
+source;share/blackbox2_core/hook/ament_prefix_path.sh
+source;../../build/blackbox2_core/share/blackbox2_core/hook/pythonpath_develop.ps1
+source;../../build/blackbox2_core/share/blackbox2_core/hook/pythonpath_develop.dsv
+source;../../build/blackbox2_core/share/blackbox2_core/hook/pythonpath_develop.sh

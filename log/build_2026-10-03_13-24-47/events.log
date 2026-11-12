@@ -1,0 +1,55 @@
+[0.000000] (-) TimerEvent: {}
+[0.000389] (blackbox2_core) JobQueued: {'identifier': 'blackbox2_core', 'dependencies': OrderedDict()}
+[0.000670] (blackbox2_core) JobStarted: {'identifier': 'blackbox2_core'}
+[0.099641] (-) TimerEvent: {}
+[0.200036] (-) TimerEvent: {}
+[0.300377] (-) TimerEvent: {}
+[0.400778] (-) TimerEvent: {}
+[0.501096] (-) TimerEvent: {}
+[0.601411] (-) TimerEvent: {}
+[0.701705] (-) TimerEvent: {}
+[0.802026] (-) TimerEvent: {}
+[0.902325] (-) TimerEvent: {}
+[1.002667] (-) TimerEvent: {}
+[1.103096] (-) TimerEvent: {}
+[1.203431] (-) TimerEvent: {}
+[1.303734] (-) TimerEvent: {}
+[1.404064] (-) TimerEvent: {}
+[1.412772] (blackbox2_core) Command: {'cmd': ['/usr/bin/python3', '-W', 'ignore:setup.py install is deprecated', '-W', 'ignore:easy_install command is deprecated', 'setup.py', 'egg_info', '--egg-base', '../../build/blackbox2_core', 'build', '--build-base', '/home/manekin2/blackbox2_ws/build/blackbox2_core/build', 'install', '--record', '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log', '--install-scripts', '$base/lib/blackbox2_core', '--single-version-externally-managed', 'install_data'], 'cwd': '/home/manekin2/blackbox2_ws/src/blackbox2_core', 'env': OrderedDict({'LESSOPEN': '| /usr/bin/lesspipe %s', 'USER': 'manekin2', 'SSH_CLIENT': '10.184.238.59 6852 22', 'XDG_SESSION_TYPE': 'tty', 'SHLVL': '1', 'LD_LIBRARY_PATH': '/opt/ros/jazzy/opt/rviz_ogre_vendor/lib:/opt/ros/jazzy/lib/aarch64-linux-gnu:/opt/ros/jazzy/opt/gz_math_vendor/lib:/opt/ros/jazzy/opt/gz_utils_vendor/lib:/opt/ros/jazzy/opt/gz_cmake_vendor/lib:/opt/ros/jazzy/lib', 'HOME': '/home/manekin2', 'OLDPWD': '/home/manekin2', 'SSH_TTY': '/dev/pts/0', 'ROS_PYTHON_VERSION': '3', 'PS1': '(venv) \\[\\e]0;\\u@\\h: \\w\\a\\]${debian_chroot:+($debian_chroot)}\\[\\033[01;32m\\]\\u@\\h\\[\\033[00m\\]:\\[\\033[01;34m\\]\\w\\[\\033[00m\\]\\$', 'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/run/user/1000/bus', 'COLCON_PREFIX_PATH': '/home/manekin2/blackbox2_ws/install', 'ROS_DISTRO': 'jazzy', 'LOGNAME': 'manekin2', '_': '/usr/bin/colcon', 'ROS_VERSION': '2', 'XDG_SESSION_CLASS': 'user', 'TERM': 'xterm-256color', 'XDG_SESSION_ID': '1', 'PATH': '/home/manekin2/blackbox2_ws/venv/bin:/opt/ros/jazzy/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/snap/bin', 'XDG_RUNTIME_DIR': '/run/user/1000', 'LANG': 'en_US.UTF-8', 'VIRTUAL_ENV_PROMPT': '(venv)', 'LS_COLORS': 'rs=0:di=01;34:ln=01;36:mh=00:pi=40;33:so=01;35:do=01;35:bd=40;33;01:cd=40;33;01:or=40;31;01:mi=00:su=37;41:sg=30;43:ca=00:tw=30;42:ow=34;42:st=37;44:ex=01;32:*.tar=01;31:*.tgz=01;31:*.arc=01;31:*.arj=01;31:*.taz=01;31:*.lha=01;31:*.lz4=01;31:*.lzh=01;31:*.lzma=01;31:*.tlz=01;31:*.txz=01;31:*.tzo=01;31:*.t7z=01;31:*.zip=01;31:*.z=01;31:*.dz=01;31:*.gz=01;31:*.lrz=01;31:*.lz=01;31:*.lzo=01;31:*.xz=01;31:*.zst=01;31:*.tzst=01;31:*.bz2=01;31:*.bz=01;31:*.tbz=01;31:*.tbz2=01;31:*.tz=01;31:*.deb=01;31:*.rpm=01;31:*.jar=01;31:*.war=01;31:*.ear=01;31:*.sar=01;31:*.rar=01;31:*.alz=01;31:*.ace=01;31:*.zoo=01;31:*.cpio=01;31:*.7z=01;31:*.rz=01;31:*.cab=01;31:*.wim=01;31:*.swm=01;31:*.dwm=01;31:*.esd=01;31:*.avif=01;35:*.jpg=01;35:*.jpeg=01;35:*.mjpg=01;35:*.mjpeg=01;35:*.gif=01;35:*.bmp=01;35:*.pbm=01;35:*.pgm=01;35:*.ppm=01;35:*.tga=01;35:*.xbm=01;35:*.xpm=01;35:*.tif=01;35:*.tiff=01;35:*.png=01;35:*.svg=01;35:*.svgz=01;35:*.mng=01;35:*.pcx=01;35:*.mov=01;35:*.mpg=01;35:*.mpeg=01;35:*.m2v=01;35:*.mkv=01;35:*.webm=01;35:*.webp=01;35:*.ogm=01;35:*.mp4=01;35:*.m4v=01;35:*.mp4v=01;35:*.vob=01;35:*.qt=01;35:*.nuv=01;35:*.wmv=01;35:*.asf=01;35:*.rm=01;35:*.rmvb=01;35:*.flc=01;35:*.avi=01;35:*.fli=01;35:*.flv=01;35:*.gl=01;35:*.dl=01;35:*.xcf=01;35:*.xwd=01;35:*.yuv=01;35:*.cgm=01;35:*.emf=01;35:*.ogv=01;35:*.ogx=01;35:*.aac=00;36:*.au=00;36:*.flac=00;36:*.m4a=00;36:*.mid=00;36:*.midi=00;36:*.mka=00;36:*.mp3=00;36:*.mpc=00;36:*.ogg=00;36:*.ra=00;36:*.wav=00;36:*.oga=00;36:*.opus=00;36:*.spx=00;36:*.xspf=00;36:*~=00;90:*#=00;90:*.bak=00;90:*.crdownload=00;90:*.dpkg-dist=00;90:*.dpkg-new=00;90:*.dpkg-old=00;90:*.dpkg-tmp=00;90:*.old=00;90:*.orig=00;90:*.part=00;90:*.rej=00;90:*.rpmnew=00;90:*.rpmorig=00;90:*.rpmsave=00;90:*.swp=00;90:*.tmp=00;90:*.ucf-dist=00;90:*.ucf-new=00;90:*.ucf-old=00;90:', 'AMENT_PREFIX_PATH': '/home/manekin2/blackbox2_ws/install/blackbox2_core:/opt/ros/jazzy', 'SHELL': '/bin/bash', 'LESSCLOSE': '/usr/bin/lesspipe %s %s', 'VIRTUAL_ENV': '/home/manekin2/blackbox2_ws/venv', 'ROS_AUTOMATIC_DISCOVERY_RANGE': 'SUBNET', 'PWD': '/home/manekin2/blackbox2_ws/build/blackbox2_core', 'LC_ALL': 'en_US.UTF-8', 'SSH_CONNECTION': '10.184.238.59 6852 10.184.238.79 22', 'XDG_DATA_DIRS': '/usr/local/share:/usr/share:/var/lib/snapd/desktop', 'PYTHONPATH': '/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:/home/manekin2/blackbox2_ws/venv/lib/python3.12/site-packages:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:/opt/ros/jazzy/opt/gz_math_vendor/lib/python:/opt/ros/jazzy/lib/python3.12/site-packages', 'COLCON': '1', 'CMAKE_PREFIX_PATH': '/opt/ros/jazzy/opt/gz_math_vendor:/opt/ros/jazzy/opt/gz_utils_vendor:/opt/ros/jazzy/opt/gz_cmake_vendor'}), 'shell': False}
+[1.504160] (-) TimerEvent: {}
+[1.604490] (-) TimerEvent: {}
+[1.704793] (-) TimerEvent: {}
+[1.805097] (-) TimerEvent: {}
+[1.806366] (blackbox2_core) StdoutLine: {'line': b'running egg_info\n'}
+[1.833195] (blackbox2_core) StdoutLine: {'line': b'writing ../../build/blackbox2_core/blackbox2_core.egg-info/PKG-INFO\n'}
+[1.833807] (blackbox2_core) StdoutLine: {'line': b'writing dependency_links to ../../build/blackbox2_core/blackbox2_core.egg-info/dependency_links.txt\n'}
+[1.834165] (blackbox2_core) StdoutLine: {'line': b'writing entry points to ../../build/blackbox2_core/blackbox2_core.egg-info/entry_points.txt\n'}
+[1.834410] (blackbox2_core) StdoutLine: {'line': b'writing requirements to ../../build/blackbox2_core/blackbox2_core.egg-info/requires.txt\n'}
+[1.834554] (blackbox2_core) StdoutLine: {'line': b'writing top-level names to ../../build/blackbox2_core/blackbox2_core.egg-info/top_level.txt\n'}
+[1.891053] (blackbox2_core) StdoutLine: {'line': b"reading manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'\n"}
+[1.892683] (blackbox2_core) StdoutLine: {'line': b"writing manifest file '../../build/blackbox2_core/blackbox2_core.egg-info/SOURCES.txt'\n"}
+[1.892873] (blackbox2_core) StdoutLine: {'line': b'running build\n'}
+[1.893071] (blackbox2_core) StdoutLine: {'line': b'running build_py\n'}
+[1.893286] (blackbox2_core) StdoutLine: {'line': b'copying blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core\n'}
+[1.894204] (blackbox2_core) StdoutLine: {'line': b'running install\n'}
+[1.901188] (blackbox2_core) StdoutLine: {'line': b'running install_lib\n'}
+[1.905169] (-) TimerEvent: {}
+[1.928337] (blackbox2_core) StdoutLine: {'line': b'copying /home/manekin2/blackbox2_ws/build/blackbox2_core/build/lib/blackbox2_core/hx711_node.py -> /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core\n'}
+[1.929444] (blackbox2_core) StdoutLine: {'line': b'byte-compiling /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core/hx711_node.py to hx711_node.cpython-312.pyc\n'}
+[1.931292] (blackbox2_core) StdoutLine: {'line': b'running install_data\n'}
+[1.931806] (blackbox2_core) StdoutLine: {'line': b'running install_egg_info\n'}
+[1.958979] (blackbox2_core) StdoutLine: {'line': b"removing '/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info' (and everything under it)\n"}
+[1.959505] (blackbox2_core) StdoutLine: {'line': b'Copying ../../build/blackbox2_core/blackbox2_core.egg-info to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2_core-0.0.0-py3.12.egg-info\n'}
+[1.961016] (blackbox2_core) StdoutLine: {'line': b'running install_scripts\n'}
+[2.005267] (-) TimerEvent: {}
+[2.016953] (blackbox2_core) StdoutLine: {'line': b'Installing adxl_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.017223] (blackbox2_core) StdoutLine: {'line': b'Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.017446] (blackbox2_core) StdoutLine: {'line': b'Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.017632] (blackbox2_core) StdoutLine: {'line': b'Installing dummy_sensor script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.017830] (blackbox2_core) StdoutLine: {'line': b'Installing hx711_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.018002] (blackbox2_core) StdoutLine: {'line': b'Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.018191] (blackbox2_core) StdoutLine: {'line': b'Installing sensor_acquisition script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core\n'}
+[2.018856] (blackbox2_core) StdoutLine: {'line': b"writing list of installed files to '/home/manekin2/blackbox2_ws/build/blackbox2_core/install.log'\n"}
+[2.091423] (blackbox2_core) CommandEnded: {'returncode': 0}
+[2.104139] (blackbox2_core) JobEnded: {'identifier': 'blackbox2_core', 'rc': 0}
+[2.105037] (-) EventReactorShutdown: {}
