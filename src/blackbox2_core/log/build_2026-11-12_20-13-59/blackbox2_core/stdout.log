@@ -1,0 +1,31 @@
+running develop
+running egg_info
+creating blackbox2_core.egg-info
+writing blackbox2_core.egg-info/PKG-INFO
+writing dependency_links to blackbox2_core.egg-info/dependency_links.txt
+writing entry points to blackbox2_core.egg-info/entry_points.txt
+writing requirements to blackbox2_core.egg-info/requires.txt
+writing top-level names to blackbox2_core.egg-info/top_level.txt
+writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+reading manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/python3.12/site-packages/blackbox2-core.egg-link (link to .)
+Installing analog_sensor_node script to /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/blackbox2_core
+Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/blackbox2_core
+Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/blackbox2_core
+Installing lora_transmitter script to /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/blackbox2_core
+Installing mcp9808_node script to /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/lib/blackbox2_core
+
+Installed /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core
+running symlink_data
+creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/ament_index
+creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/ament_index/resource_index
+creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/ament_index/resource_index/packages
+symbolically linking /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core/resource/blackbox2_core -> /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/ament_index/resource_index/packages
+symbolically linking /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core/package.xml -> /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core
+creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core/launch
+symbolically linking /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core/launch/telemetry.launch.py -> /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core/launch
+creating /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core/config
+symbolically linking /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core/config/sensors.yaml -> /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core/config
+symbolically linking /home/manekin2/blackbox2_ws/src/blackbox2_core/build/blackbox2_core/config/devices.yaml -> /home/manekin2/blackbox2_ws/src/blackbox2_core/install/blackbox2_core/share/blackbox2_core/config

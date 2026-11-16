@@ -1,0 +1,21 @@
+[2.274s] Invoking command in '/home/manekin2/blackbox2_ws/build/blackbox2_core': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/manekin2/blackbox2_ws/build/blackbox2_core/build --no-deps symlink_data
+[2.770s] running develop
+[3.079s] running egg_info
+[3.108s] writing blackbox2_core.egg-info/PKG-INFO
+[3.110s] writing dependency_links to blackbox2_core.egg-info/dependency_links.txt
+[3.110s] writing entry points to blackbox2_core.egg-info/entry_points.txt
+[3.111s] writing requirements to blackbox2_core.egg-info/requires.txt
+[3.112s] writing top-level names to blackbox2_core.egg-info/top_level.txt
+[3.172s] reading manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+[3.174s] writing manifest file 'blackbox2_core.egg-info/SOURCES.txt'
+[3.204s] running build_ext
+[3.205s] Creating /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages/blackbox2-core.egg-link (link to .)
+[3.206s] Installing analog_sensor_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[3.206s] Installing arduino_uno_q script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[3.207s] Installing cosmic_aurora script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[3.207s] Installing lora_transmitter script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[3.207s] Installing mcp9808_node script to /home/manekin2/blackbox2_ws/install/blackbox2_core/lib/blackbox2_core
+[3.208s] 
+[3.208s] Installed /home/manekin2/blackbox2_ws/build/blackbox2_core
+[3.208s] running symlink_data
+[3.314s] Invoked command in '/home/manekin2/blackbox2_ws/build/blackbox2_core' returned '0': PYTHONPATH=/home/manekin2/blackbox2_ws/build/blackbox2_core/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/manekin2/blackbox2_ws/install/blackbox2_core/lib/python3.12/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(venv) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/manekin2/blackbox2_ws/build/blackbox2_core/build --no-deps symlink_data
