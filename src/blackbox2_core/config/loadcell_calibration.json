@@ -1,0 +1,8 @@
+{
+    "sensors": {
+        "LC_TEST": {
+            "offset": 0,
+            "scale": 1
+        }
+    }
+}

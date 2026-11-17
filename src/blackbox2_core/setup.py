@@ -44,6 +44,7 @@ setup(
             'lora_transmitter = blackbox2_core.transport.lora_transmitter_node:main',
             'mcp9808_node = blackbox2_core.sensors.i2c.mcp9808_node:main',
             'analog_sensor_node = blackbox2_core.sensors.analog_mux.analog_sensor_node:main',
+            'hx711_node = blackbox2_core.sensors.gpio.hx711_node:main',
         ],
     },
 )

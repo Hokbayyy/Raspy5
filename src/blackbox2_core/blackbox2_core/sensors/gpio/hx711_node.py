@@ -35,11 +35,11 @@ class KalmanFilter:
 
         self.p += self.q
 
-        k = self.p / (self.p + self.r)
+        gain = self.p / (self.p + self.r)
 
-        self.x += k * (measurement - self.x)
+        self.x += gain * (measurement - self.x)
 
-        self.p *= (1.0 - k)
+        self.p *= (1.0 - gain)
 
         return self.x
 
@@ -52,13 +52,13 @@ class HX711:
 
     def __init__(
         self,
-        handle,
+        gpio_handle,
         dt_pin=20,
         sck_pin=21,
         read_timeout=1.0
     ):
 
-        self.handle = handle
+        self.gpio_handle = gpio_handle
 
         self.dt_pin = dt_pin
         self.sck_pin = sck_pin
@@ -71,14 +71,14 @@ class HX711:
         try:
 
             lgpio.gpio_claim_input(
-                self.handle,
+                self.gpio_handle,
                 self.dt_pin
             )
 
             self.dt_claimed = True
 
             lgpio.gpio_claim_output(
-                self.handle,
+                self.gpio_handle,
                 self.sck_pin,
                 0
             )
@@ -90,16 +90,17 @@ class HX711:
             self.close()
             raise
 
+    # ========================================================
+    # READ RAW DATA
+    # ========================================================
+
     def read_raw(self):
 
         start_time = time.monotonic()
 
-        # ----------------------------------------------------
-        # WAIT DATA READY
-        # ----------------------------------------------------
-
+        # Tunggu HX711 siap.
         while lgpio.gpio_read(
-            self.handle,
+            self.gpio_handle,
             self.dt_pin
         ) == 1:
 
@@ -118,14 +119,11 @@ class HX711:
 
         try:
 
-            # ------------------------------------------------
-            # READ 24-BIT DATA
-            # ------------------------------------------------
-
+            # Baca 24 bit.
             for _ in range(24):
 
                 lgpio.gpio_write(
-                    self.handle,
+                    self.gpio_handle,
                     self.sck_pin,
                     1
                 )
@@ -133,27 +131,24 @@ class HX711:
                 time.sleep(0.000002)
 
                 bit = lgpio.gpio_read(
-                    self.handle,
+                    self.gpio_handle,
                     self.dt_pin
                 )
 
                 value = (value << 1) | bit
 
                 lgpio.gpio_write(
-                    self.handle,
+                    self.gpio_handle,
                     self.sck_pin,
                     0
                 )
 
                 time.sleep(0.000002)
 
-            # ------------------------------------------------
-            # 25TH PULSE
-            # CHANNEL A, GAIN 128
-            # ------------------------------------------------
-
+            # Pulsa ke-25:
+            # Channel A, gain 128.
             lgpio.gpio_write(
-                self.handle,
+                self.gpio_handle,
                 self.sck_pin,
                 1
             )
@@ -161,7 +156,7 @@ class HX711:
             time.sleep(0.000002)
 
             lgpio.gpio_write(
-                self.handle,
+                self.gpio_handle,
                 self.sck_pin,
                 0
             )
@@ -170,38 +165,40 @@ class HX711:
 
         finally:
 
-            # Pastikan SCK tidak tertinggal HIGH.
+            # Pastikan clock LOW.
             lgpio.gpio_write(
-                self.handle,
+                self.gpio_handle,
                 self.sck_pin,
                 0
             )
 
-        # ----------------------------------------------------
-        # SIGNED 24-BIT CONVERSION
-        # ----------------------------------------------------
-
+        # Konversi signed 24-bit.
         if value & 0x800000:
             value -= 0x1000000
 
         return value
 
+    # ========================================================
+    # CLOSE GPIO
+    # ========================================================
+
     def close(self):
 
-        if self.handle is None:
+        if self.gpio_handle is None:
             return
 
         if self.sck_claimed:
 
             try:
+
                 lgpio.gpio_write(
-                    self.handle,
+                    self.gpio_handle,
                     self.sck_pin,
                     0
                 )
 
                 lgpio.gpio_free(
-                    self.handle,
+                    self.gpio_handle,
                     self.sck_pin
                 )
 
@@ -213,8 +210,9 @@ class HX711:
         if self.dt_claimed:
 
             try:
+
                 lgpio.gpio_free(
-                    self.handle,
+                    self.gpio_handle,
                     self.dt_pin
                 )
 
@@ -225,7 +223,7 @@ class HX711:
 
 
 # ============================================================
-# LOAD CELL ROS 2 NODE
+# HX711 ROS 2 NODE
 # ============================================================
 
 class HX711Node(Node):
@@ -238,45 +236,17 @@ class HX711Node(Node):
         # PARAMETERS
         # ----------------------------------------------------
 
-        self.declare_parameter(
-            "gpiochip",
-            0
-        )
+        self.declare_parameter("gpiochip", 0)
+        self.declare_parameter("dt_pin", 20)
+        self.declare_parameter("sck_pin", 21)
 
-        self.declare_parameter(
-            "dt_pin",
-            20
-        )
+        self.declare_parameter("read_timeout", 1.0)
+        self.declare_parameter("publish_interval", 0.05)
 
-        self.declare_parameter(
-            "sck_pin",
-            21
-        )
+        self.declare_parameter("kalman_q", 0.01)
+        self.declare_parameter("kalman_r", 0.1)
 
-        self.declare_parameter(
-            "read_timeout",
-            1.0
-        )
-
-        self.declare_parameter(
-            "publish_interval",
-            0.05
-        )
-
-        self.declare_parameter(
-            "kalman_q",
-            0.01
-        )
-
-        self.declare_parameter(
-            "kalman_r",
-            0.1
-        )
-
-        self.declare_parameter(
-            "sensor_id",
-            "LC_TEST"
-        )
+        self.declare_parameter("sensor_id", "LC_TEST")
 
         self.declare_parameter(
             "topic",
@@ -298,7 +268,7 @@ class HX711Node(Node):
         )
 
         # ----------------------------------------------------
-        # READ PARAMETERS
+        # PARAMETER VALUES
         # ----------------------------------------------------
 
         gpiochip = self.get_parameter(
@@ -356,19 +326,24 @@ class HX711Node(Node):
                 "Kalman Q dan R harus lebih dari 0"
             )
 
+        # ----------------------------------------------------
+        # HARDWARE VARIABLES
+        # Jangan gunakan nama self.handle.
+        # ----------------------------------------------------
+
+        self.gpio_handle = None
+        self.hx711 = None
+
         self.offset = None
         self.scale = None
 
-        self.handle = None
-        self.hx711 = None
+        self.read_count = 0
+        self.error_count = 0
 
         self.filter = KalmanFilter(
             q=kalman_q,
             r=kalman_r
         )
-
-        self.read_count = 0
-        self.error_count = 0
 
         try:
 
@@ -381,10 +356,10 @@ class HX711Node(Node):
             )
 
             # ================================================
-            # OPEN GPIO
+            # OPEN GPIO CHIP
             # ================================================
 
-            self.handle = lgpio.gpiochip_open(
+            self.gpio_handle = lgpio.gpiochip_open(
                 gpiochip
             )
 
@@ -393,7 +368,7 @@ class HX711Node(Node):
             # ================================================
 
             self.hx711 = HX711(
-                handle=self.handle,
+                gpio_handle=self.gpio_handle,
                 dt_pin=dt_pin,
                 sck_pin=sck_pin,
                 read_timeout=read_timeout
@@ -410,7 +385,7 @@ class HX711Node(Node):
             )
 
             # ================================================
-            # TIMER
+            # ROS TIMER
             # ================================================
 
             self.timer = self.create_timer(
@@ -418,32 +393,40 @@ class HX711Node(Node):
                 self.acquire_data
             )
 
+            # ================================================
+            # LOGGING
+            # ================================================
+
             self.get_logger().info(
-                "HX711 node initialized."
+                "HX711 node initialized successfully."
             )
 
             self.get_logger().info(
-                f"DT: GPIO{dt_pin}"
+                f"GPIO chip: {gpiochip}"
             )
 
             self.get_logger().info(
-                f"SCK: GPIO{sck_pin}"
+                f"DT: BCM GPIO{dt_pin}"
             )
 
             self.get_logger().info(
-                f"Sensor: {self.sensor_id}"
+                f"SCK: BCM GPIO{sck_pin}"
             )
 
             self.get_logger().info(
-                f"Calibration offset: {self.offset}"
+                f"Sensor ID: {self.sensor_id}"
             )
 
             self.get_logger().info(
-                f"Calibration scale: {self.scale}"
+                f"Offset: {self.offset}"
             )
 
             self.get_logger().info(
-                f"Publishing: {topic}"
+                f"Scale: {self.scale}"
+            )
+
+            self.get_logger().info(
+                f"Publishing topic: {topic}"
             )
 
         except Exception:
@@ -477,19 +460,18 @@ class HX711Node(Node):
         if self.sensor_id not in sensors:
 
             raise ValueError(
-                f"Kalibrasi {self.sensor_id} tidak ditemukan"
+                f"Sensor {self.sensor_id} tidak ditemukan "
+                "dalam calibration file"
             )
 
-        sensor_calibration = sensors[
-            self.sensor_id
-        ]
+        calibration = sensors[self.sensor_id]
 
         self.offset = float(
-            sensor_calibration["offset"]
+            calibration["offset"]
         )
 
         self.scale = float(
-            sensor_calibration["scale"]
+            calibration["scale"]
         )
 
         if not math.isfinite(self.offset):
@@ -501,21 +483,19 @@ class HX711Node(Node):
         ):
 
             raise ValueError(
-                "Scale tidak valid atau bernilai nol"
+                "Scale tidak valid"
             )
 
     # ========================================================
-    # ACQUIRE DATA
+    # ACQUIRE SENSOR DATA
     # ========================================================
 
     def acquire_data(self):
 
         try:
 
-            # Read raw HX711
             raw = self.hx711.read_raw()
 
-            # Convert to gram
             weight = (
                 raw - self.offset
             ) / self.scale
@@ -523,10 +503,9 @@ class HX711Node(Node):
             if not math.isfinite(weight):
 
                 raise ValueError(
-                    "Hasil konversi berat tidak valid"
+                    "Hasil berat tidak valid"
                 )
 
-            # Kalman filter
             filtered = self.filter.update(
                 weight
             )
@@ -534,7 +513,7 @@ class HX711Node(Node):
             self.read_count += 1
 
             # ================================================
-            # JSON OUTPUT
+            # JSON PAYLOAD
             # ================================================
 
             payload = {
@@ -572,7 +551,7 @@ class HX711Node(Node):
             if self.read_count % 20 == 0:
 
                 self.get_logger().info(
-                    f"{self.sensor_id} | "
+                    f"Read: {self.read_count} | "
                     f"RAW: {raw} | "
                     f"Weight: {weight:.2f} g | "
                     f"Kalman: {filtered:.2f} g"
@@ -583,7 +562,7 @@ class HX711Node(Node):
             self.error_count += 1
 
             self.get_logger().warning(
-                f"HX711 timeout: {error}"
+                str(error)
             )
 
         except Exception as error:
@@ -591,11 +570,11 @@ class HX711Node(Node):
             self.error_count += 1
 
             self.get_logger().error(
-                f"HX711 acquisition failed: {error}"
+                f"HX711 acquisition error: {error}"
             )
 
     # ========================================================
-    # CLEANUP
+    # HARDWARE CLEANUP
     # ========================================================
 
     def close_hardware(self):
@@ -609,18 +588,27 @@ class HX711Node(Node):
 
             self.hx711 = None
 
-        if self.handle is not None:
+        if self.gpio_handle is not None:
 
             try:
+
                 lgpio.gpiochip_close(
-                    self.handle
+                    self.gpio_handle
                 )
+
             except Exception:
                 pass
 
-            self.handle = None
+            self.gpio_handle = None
+
+    # ========================================================
+    # NODE SHUTDOWN
+    # ========================================================
 
     def destroy_node(self):
+
+        if hasattr(self, "timer"):
+            self.timer.cancel()
 
         self.close_hardware()
 

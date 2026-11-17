@@ -21,6 +21,7 @@ blackbox2_core/sensors/analog_mux/analog_mux_driver.py
 blackbox2_core/sensors/analog_mux/analog_sensor_manager.py
 blackbox2_core/sensors/analog_mux/analog_sensor_node.py
 blackbox2_core/sensors/gpio/__init__.py
+blackbox2_core/sensors/gpio/hx711_node.py
 blackbox2_core/sensors/i2c/__init__.py
 blackbox2_core/sensors/i2c/i2c_manager.py
 blackbox2_core/sensors/i2c/mcp9808_driver.py
