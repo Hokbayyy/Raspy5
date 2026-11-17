@@ -1,6 +1,5 @@
 
-#!/usr/bin/env python3
-
+import json
 import math
 import serial
 import rclpy
@@ -10,196 +9,304 @@ from std_msgs.msg import String
 
 
 # ============================================================
-# CONFIGURATION
+# FIELD MAP: SESUAI URUTAN OUTPUT ARDUINO UNO Q
 # ============================================================
 
-SERIAL_PORT = "/dev/ttyAMA0"
-BAUDRATE = 115200
+FIELD_NAMES = [
+    "timestamp_ms",
+    "lidar_distance_cm",
+    "lidar_median_cm",
 
-TOPIC_RAW = "/telemetri/arduino"
+    "mq135_nh3_ppm",
+    "mq135_co_ppm",
+    "mq135_co2_ppm",
+    "mq2_smoke_index",
 
-EXPECTED_FIELDS = 8
-READ_INTERVAL = 0.001
-MAX_BUFFER_SIZE = 1024
+    "mpu_accel_x",
+    "mpu_accel_y",
+    "mpu_accel_z",
+
+    "mpu_gyro_x",
+    "mpu_gyro_y",
+    "mpu_gyro_z",
+
+    "mpu_accel_kalman_x",
+    "mpu_accel_kalman_y",
+    "mpu_accel_kalman_z",
+
+    "mpu_gyro_kalman_x",
+    "mpu_gyro_kalman_y",
+    "mpu_gyro_kalman_z",
+
+    "adxl_accel_x",
+    "adxl_accel_y",
+    "adxl_accel_z",
+
+    "adxl_accel_kalman_x",
+    "adxl_accel_kalman_y",
+    "adxl_accel_kalman_z",
+]
 
 
-# ============================================================
-# ARDUINO UNO Q UART NODE
-# ============================================================
-
-class ArduinoNode(Node):
+class ArduinoUnoQNode(Node):
 
     def __init__(self):
-        super().__init__("arduino_uno_q_node")
+        super().__init__('arduino_uno_q_node')
 
-        # Publisher: raw Arduino payload
-        self.pub = self.create_publisher(
+        # ----------------------------------------------------
+        # SERIAL CONFIGURATION
+        # ----------------------------------------------------
+        self.port = '/dev/ttyAMA0'
+        self.baudrate = 115200
+
+        self.ser = serial.Serial(
+            self.port,
+            self.baudrate,
+            timeout=0.01
+        )
+
+        self.buffer = bytearray()
+        self.max_buffer_size = 4096
+
+        # ----------------------------------------------------
+        # ROS 2 PUBLISHERS
+        # ----------------------------------------------------
+
+        # Original Arduino frame (compatibility)
+        self.raw_pub = self.create_publisher(
             String,
-            TOPIC_RAW,
+            '/telemetri/arduino',
             10
         )
 
-        # UART
-        self.ser = serial.Serial(
-            port=SERIAL_PORT,
-            baudrate=BAUDRATE,
-            timeout=0
+        # Normalized dynamic JSON
+        self.data_pub = self.create_publisher(
+            String,
+            '/telemetri/arduino/data',
+            10
         )
 
-        self.buf = bytearray()
-        self.count = 0
-        self.invalid_count = 0
+        self.frame_count = 0
+        self.error_count = 0
 
         self.timer = self.create_timer(
-            READ_INTERVAL,
-            self.read_uart
+            0.005,
+            self.read_serial
         )
 
         self.get_logger().info(
-            f"Arduino UNO Q connected: {SERIAL_PORT}"
+            f'Arduino UNO Q connected: '
+            f'{self.port} @ {self.baudrate}'
         )
 
         self.get_logger().info(
-            f"Publishing raw data to {TOPIC_RAW}"
+            f'Expected initial fields: {len(FIELD_NAMES)}'
         )
 
     # ========================================================
-    # VALIDATE FRAME
+    # SERIAL READER
     # ========================================================
 
-    def validate_frame(self, frame):
-
-        if not frame.startswith(b"<"):
-            return False
-
-        if not frame.endswith(b">"):
-            return False
-
+    def read_serial(self):
         try:
-            content = frame[1:-1].decode("ascii")
+            waiting = self.ser.in_waiting
+            incoming = self.ser.read(waiting if waiting else 1)
 
-            fields = content.split(",")
-
-            if len(fields) != EXPECTED_FIELDS:
-                return False
-
-            # Validasi angka saja.
-            # Nilai tidak digunakan untuk menyusun ulang payload.
-            for field in fields:
-
-                value = float(field.strip())
-
-                if not math.isfinite(value):
-                    return False
-
-            return True
-
-        except (ValueError, UnicodeDecodeError):
-            return False
-
-    # ========================================================
-    # READ UART
-    # ========================================================
-
-    def read_uart(self):
-
-        try:
-
-            available = self.ser.in_waiting
-
-            if available <= 0:
+            if not incoming:
                 return
 
-            incoming = self.ser.read(available)
+            self.buffer.extend(incoming)
 
-            self.buf.extend(incoming)
-
-            # Proteksi buffer jika frame rusak
-            if len(self.buf) > MAX_BUFFER_SIZE:
+            # Protect against unlimited buffer growth
+            if len(self.buffer) > self.max_buffer_size:
+                self.buffer.clear()
+                self.error_count += 1
 
                 self.get_logger().warning(
-                    "UART buffer overflow, clearing buffer."
+                    'UART buffer overflow; buffer cleared'
                 )
-
-                self.buf.clear()
-                self.invalid_count += 1
                 return
 
-            # Ambil frame lengkap berdasarkan newline
-            while b"\n" in self.buf:
+            self.process_frames()
 
-                frame, _, remaining = self.buf.partition(b"\n")
-
-                self.buf = bytearray(remaining)
-
-                frame = frame.strip()
-
-                if not frame:
-                    continue
-
-                if not self.validate_frame(frame):
-
-                    self.invalid_count += 1
-                    continue
-
-                # ============================================
-                # PUBLISH ORIGINAL FRAME
-                # ============================================
-
-                msg = String()
-
-                # Tidak membongkar atau menyusun ulang data.
-                msg.data = frame.decode("ascii")
-
-                self.pub.publish(msg)
-
-                self.count += 1
-
-                if self.count % 100 == 0:
-
-                    self.get_logger().info(
-                        f"Arduino packets published: {self.count}"
-                    )
-
-        except serial.SerialException as error:
-
+        except serial.SerialException as e:
             self.get_logger().error(
-                f"UART error: {error}"
+                f'Serial error: {e}'
             )
 
-        except Exception as error:
-
+        except Exception as e:
             self.get_logger().error(
-                f"Read error: {error}"
+                f'Reader error: {e}'
             )
 
     # ========================================================
-    # SHUTDOWN
+    # FRAME EXTRACTION: < ... >
+    # ========================================================
+
+    def process_frames(self):
+
+        while True:
+
+            start = self.buffer.find(b'<')
+
+            if start == -1:
+                self.buffer.clear()
+                return
+
+            if start > 0:
+                del self.buffer[:start]
+
+            end = self.buffer.find(b'>')
+
+            if end == -1:
+                return
+
+            frame = bytes(self.buffer[:end + 1])
+            del self.buffer[:end + 1]
+
+            try:
+                text = frame.decode('ascii').strip()
+
+                self.publish_raw(text)
+                self.parse_and_publish(text)
+
+            except UnicodeDecodeError:
+                self.error_count += 1
+
+                self.get_logger().warning(
+                    'Non-ASCII UART frame rejected'
+                )
+
+    # ========================================================
+    # RAW TOPIC
+    # ========================================================
+
+    def publish_raw(self, frame):
+
+        msg = String()
+        msg.data = frame
+
+        self.raw_pub.publish(msg)
+
+    # ========================================================
+    # DYNAMIC DATA PARSER
+    # ========================================================
+
+    def parse_and_publish(self, frame):
+
+        payload = frame[1:-1].strip()
+
+        if not payload:
+            self.error_count += 1
+            return
+
+        parts = payload.split(',')
+
+        values = []
+
+        try:
+            for part in parts:
+
+                value = float(part.strip())
+
+                if not math.isfinite(value):
+                    raise ValueError(
+                        f'Invalid numeric value: {part}'
+                    )
+
+                values.append(value)
+
+        except ValueError as e:
+            self.error_count += 1
+
+            self.get_logger().warning(
+                f'Invalid frame: {e}'
+            )
+            return
+
+        # ----------------------------------------------------
+        # AUTOMATIC FIELD MAPPING
+        # ----------------------------------------------------
+
+        data = {}
+
+        for index, value in enumerate(values):
+
+            if index < len(FIELD_NAMES):
+
+                field_name = FIELD_NAMES[index]
+
+            else:
+                # Automatically accept newly appended fields
+                field_name = f'extra_{index + 1}'
+
+            # Timestamp is represented as integer
+            if index == 0:
+                data[field_name] = int(value)
+            else:
+                data[field_name] = value
+
+        # ----------------------------------------------------
+        # STATUS
+        # ----------------------------------------------------
+
+        if len(values) < len(FIELD_NAMES):
+            status = 'partial'
+
+        elif len(values) == len(FIELD_NAMES):
+            status = 'complete'
+
+        else:
+            status = 'extended'
+
+        output = {
+            'source': 'arduino_uno_q',
+            'status': status,
+            'field_count': len(values),
+            'data': data
+        }
+
+        # ----------------------------------------------------
+        # PUBLISH JSON
+        # ----------------------------------------------------
+
+        msg = String()
+        msg.data = json.dumps(
+            output,
+            separators=(',', ':'),
+            allow_nan=False
+        )
+
+        self.data_pub.publish(msg)
+
+        self.frame_count += 1
+
+        # Avoid excessive logging at high data rates
+        if self.frame_count % 100 == 0:
+
+            self.get_logger().info(
+                f'Frames: {self.frame_count} | '
+                f'Fields: {len(values)} | '
+                f'Status: {status}'
+            )
+
+    # ========================================================
+    # CLEAN SHUTDOWN
     # ========================================================
 
     def destroy_node(self):
 
-        if hasattr(self, "ser") and self.ser.is_open:
+        if hasattr(self, 'ser') and self.ser.is_open:
             self.ser.close()
-
-        self.get_logger().info(
-            f"Arduino stopped. "
-            f"Published: {self.count}, "
-            f"Invalid: {self.invalid_count}"
-        )
 
         super().destroy_node()
 
-
-# ============================================================
-# MAIN
-# ============================================================
 
 def main(args=None):
 
     rclpy.init(args=args)
 
-    node = ArduinoNode()
+    node = ArduinoUnoQNode()
 
     try:
         rclpy.spin(node)
@@ -208,12 +315,9 @@ def main(args=None):
         pass
 
     finally:
-
         node.destroy_node()
-
-        if rclpy.ok():
-            rclpy.shutdown()
+        rclpy.shutdown()
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
