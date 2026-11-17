@@ -1,131 +1,180 @@
 
+import json
+import math
+import serial
+
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
-import serial
-import time
 
 
 class CosmicAuroraNode(Node):
+
+    FIELD_NAMES = [
+        'accel_x',
+        'accel_y',
+        'accel_z',
+        'gyro_x',
+        'gyro_y',
+        'gyro_z',
+        'bme_temperature',
+        'bme_humidity',
+        'bme_pressure',
+        'bme_altitude',
+        'sound_db_left',
+        'sound_db_right'
+    ]
+
     def __init__(self):
         super().__init__('cosmic_aurora_node')
-
-        self.publisher_ = self.create_publisher(
-            String,
-            '/telemetri/aurora',
-            10
-        )
 
         self.port_name = '/dev/ttyAMA2'
         self.baudrate = 115200
 
-        self.serial_port = None
+        self.ser = None
         self.buffer = bytearray()
 
-        self.last_retry = 0.0
-        self.retry_interval = 3.0
+        self.raw_pub = self.create_publisher(
+            String, '/telemetri/aurora', 10
+        )
+
+        self.data_pub = self.create_publisher(
+            String, '/telemetri/aurora/data', 10
+        )
+
+        self.total_frames = 0
+        self.valid_frames = 0
+        self.invalid_frames = 0
 
         self.connect_serial()
 
         self.timer = self.create_timer(
-            0.02,
-            self.read_serial
+            0.005, self.read_serial
         )
 
     def connect_serial(self):
         try:
-            self.serial_port = serial.Serial(
-                port=self.port_name,
-                baudrate=self.baudrate,
-                timeout=0,
-                write_timeout=1
+            self.ser = serial.Serial(
+                self.port_name,
+                self.baudrate,
+                timeout=0
             )
 
-            self.buffer.clear()
-
             self.get_logger().info(
-                f'Aurora connected: {self.port_name} '
+                f'Connected: {self.port_name} '
                 f'@ {self.baudrate}'
             )
 
-        except (serial.SerialException, OSError) as e:
-            self.serial_port = None
-            self.last_retry = time.monotonic()
-
+        except serial.SerialException as e:
+            self.ser = None
             self.get_logger().error(
-                f'Aurora connection failed: {e}'
+                f'Serial connection failed: {e}'
             )
 
     def read_serial(self):
-        if self.serial_port is None or not self.serial_port.is_open:
-            now = time.monotonic()
-
-            if now - self.last_retry >= self.retry_interval:
-                self.connect_serial()
-
+        if self.ser is None or not self.ser.is_open:
             return
 
         try:
-            waiting = self.serial_port.in_waiting
+            waiting = self.ser.in_waiting
 
             if waiting <= 0:
                 return
 
-            data = self.serial_port.read(waiting)
+            self.buffer.extend(self.ser.read(waiting))
 
-            if not data:
+            if len(self.buffer) > 8192:
+                self.buffer.clear()
+                self.invalid_frames += 1
+                self.get_logger().warning(
+                    'Serial buffer overflow'
+                )
                 return
 
-            self.buffer.extend(data)
-
-            # Pisahkan data berdasarkan newline.
             while b'\n' in self.buffer:
-                raw_line, _, remaining = self.buffer.partition(b'\n')
+                line, _, remaining = self.buffer.partition(b'\n')
                 self.buffer = bytearray(remaining)
 
-                raw_line = raw_line.strip(b'\r \t')
+                self.process_frame(line)
 
-                if not raw_line:
-                    continue
-
-                decoded = raw_line.decode(
-                    'utf-8',
-                    errors='replace'
-                )
-
-                msg = String()
-                msg.data = decoded
-
-                self.publisher_.publish(msg)
-
-                self.get_logger().info(
-                    f'Aurora RX: {decoded}'
-                )
-
-            # Hindari buffer tumbuh tanpa batas jika tidak ada newline.
-            if len(self.buffer) > 8192:
-                self.get_logger().warning(
-                    'Aurora buffer terlalu besar, reset buffer'
-                )
-                self.buffer.clear()
-
-        except (serial.SerialException, OSError) as e:
+        except serial.SerialException as e:
             self.get_logger().error(
-                f'Aurora serial disconnected: {e}'
+                f'Serial read error: {e}'
             )
 
-            try:
-                self.serial_port.close()
-            except Exception:
-                pass
+    def process_frame(self, raw_line):
+        self.total_frames += 1
 
-            self.serial_port = None
-            self.buffer.clear()
-            self.last_retry = time.monotonic()
+        try:
+            line = raw_line.decode('ascii').strip()
+
+            if not line:
+                return
+
+            values = [
+                float(item.strip())
+                for item in line.split(',')
+            ]
+
+            if not values:
+                raise ValueError('Empty frame')
+
+            if not all(math.isfinite(v) for v in values):
+                raise ValueError('Invalid numeric value')
+
+            # Raw CSV publisher
+            raw_msg = String()
+            raw_msg.data = line
+            self.raw_pub.publish(raw_msg)
+
+            # Dynamic mapping
+            data = {}
+
+            for index, value in enumerate(values):
+                if index < len(self.FIELD_NAMES):
+                    name = self.FIELD_NAMES[index]
+                else:
+                    name = f'extra_{index + 1}'
+
+                data[name] = value
+
+            status = (
+                'complete' if len(values) == 12
+                else 'partial' if len(values) < 12
+                else 'extended'
+            )
+
+            payload = {
+                'source': 'cosmic_aurora',
+                'status': status,
+                'field_count': len(values),
+                'data': data
+            }
+
+            json_msg = String()
+            json_msg.data = json.dumps(
+                payload,
+                separators=(',', ':')
+            )
+
+            self.data_pub.publish(json_msg)
+
+            self.valid_frames += 1
+
+            if self.valid_frames % 100 == 0:
+                self.get_logger().info(
+                    f'Valid frames: {self.valid_frames} | '
+                    f'Invalid: {self.invalid_frames}'
+                )
+
+        except (ValueError, UnicodeDecodeError):
+            self.invalid_frames += 1
+            # Pesan ERR atau teks debug tidak diteruskan.
+            return
 
     def destroy_node(self):
-        if self.serial_port is not None:
-            self.serial_port.close()
+        if self.ser is not None and self.ser.is_open:
+            self.ser.close()
 
         super().destroy_node()
 
@@ -137,8 +186,10 @@ def main(args=None):
 
     try:
         rclpy.spin(node)
+
     except KeyboardInterrupt:
         pass
+
     finally:
         node.destroy_node()
         rclpy.shutdown()
