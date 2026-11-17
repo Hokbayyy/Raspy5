@@ -1,56 +1,96 @@
+
 import time
 
 
 class AnalogSensorManager:
     """
-    Batch acquisition:
-    - FSR: 14 kanal melalui ADS1115 A0
-    - Piezo: 14 kanal melalui ADS1115 A1
-    - Flex: 16 kanal melalui ADS1115 A2
+    Akuisisi tiga modul analog multiplexer.
 
-    Output berupa array nilai sesuai urutan kanal.
+    FSR:
+        ADS1115 A0, channel 0-13
+
+    Piezo:
+        ADS1115 A1, channel 0-13
+
+    Flex:
+        ADS1115 A2, channel 0-15
+
+    Ketiga multiplexer berbagi GPIO S0-S3.
     """
+
+    FSR_CHANNELS = 14
+    PIEZO_CHANNELS = 14
+    FLEX_CHANNELS = 16
+    TOTAL_CHANNELS = 16
 
     def __init__(self, mux, adc):
         self.mux = mux
         self.adc = adc
 
+    @staticmethod
+    def safe_read(adc, channel):
+        """
+        Membaca satu kanal ADC.
+        Jika pembacaan gagal, kembalikan None.
+        """
+        try:
+            value = adc.read_voltage(channel)
+
+            if value is None:
+                return None
+
+            return round(float(value), 4)
+
+        except (OSError, ValueError, RuntimeError):
+            return None
+
     def read_all(self):
+        """
+        Membaca seluruh sensor dalam satu batch.
+
+        Output:
+        {
+            "fsr": [...14 nilai...],
+            "piezo": [...14 nilai...],
+            "flex": [...16 nilai...]
+        }
+        """
+
         fsr = []
         piezo = []
         flex = []
 
         start_time = time.perf_counter()
 
-        for channel in range(16):
+        for channel in range(self.TOTAL_CHANNELS):
+
+            # Pilih kanal multiplexer yang sama
+            # untuk ketiga modul analog.
             self.mux.select_channel(channel)
 
-            # FSR: CH0-CH13
-            if channel < 14:
-                try:
-                    value = self.adc.read_voltage(0)
-                    fsr.append(round(value, 4))
-                except OSError:
-                    fsr.append(None)
+            # FSR: A0, channel 0-13
+            if channel < self.FSR_CHANNELS:
+                fsr.append(
+                    self.safe_read(self.adc, 0)
+                )
 
-                # Piezo: CH0-CH13
-                try:
-                    value = self.adc.read_voltage(1)
-                    piezo.append(round(value, 4))
-                except OSError:
-                    piezo.append(None)
+            # Piezo: A1, channel 0-13
+            if channel < self.PIEZO_CHANNELS:
+                piezo.append(
+                    self.safe_read(self.adc, 1)
+                )
 
-            # Flex: CH0-CH15
-            try:
-                value = self.adc.read_voltage(2)
-                flex.append(round(value, 4))
-            except OSError:
-                flex.append(None)
+            # Flex: A2, channel 0-15
+            flex.append(
+                self.safe_read(self.adc, 2)
+            )
 
         elapsed = time.perf_counter() - start_time
 
-        return {
+        result = {
             "fsr": fsr,
             "piezo": piezo,
             "flex": flex
-        }, elapsed
+        }
+
+        return result, elapsed

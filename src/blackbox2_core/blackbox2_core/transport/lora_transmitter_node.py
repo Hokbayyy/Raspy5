@@ -1,21 +1,21 @@
+
 #!/usr/bin/env python3
 
 import json
 import math
-import random
 import time
 import threading
 from collections import deque
 
 import serial
-
 import rclpy
+
 from rclpy.node import Node
 from std_msgs.msg import String
 
 
 # ============================================================
-# KONFIGURASI RAK LORA
+# RAK LORA CONFIGURATION
 # ============================================================
 
 SERIAL_PORT = "/dev/ttyAMA3"
@@ -28,22 +28,34 @@ CODING_RATE = 0
 PREAMBLE = 8
 TX_POWER = 20
 
-TRANSMIT_INTERVAL = 0.000
+# Kirim satu paket setiap 1 detik
+TRANSMIT_INTERVAL = 1.0
 
-# Satu fragment saja
+# Batas pemeriksaan ukuran paket di sisi gateway.
+# Pastikan juga sesuai batas payload dan konfigurasi RAK.
 MAX_PAYLOAD = 700
 
+# Pertahankan nilai terakhir yang valid.
+# Tidak pernah membuat nilai dummy.
 HOLD_LAST_VALUE = True
-ENABLE_DUMMY_DATA = True
+
+# Maksimal antrean paket
+MAX_QUEUE_SIZE = 3
 
 
 # ============================================================
-# URUTAN 35 PARAMETER
+# FIELD ORDER - TOTAL 99 FIELD
+# URUTAN INI TIDAK BOLEH DIUBAH TANPA MENYESUAIKAN RECEIVER
 # ============================================================
 
 EXPECTED_KEYS = [
-    # Arduino UNO Q (23)
+
+    # --------------------------------------------------------
+    # 1. ARDUINO UNO Q (23)
+    # --------------------------------------------------------
+
     "lidar_raw",
+
     "mq_nh3",
     "mq_co",
     "mq_co2",
@@ -73,7 +85,10 @@ EXPECTED_KEYS = [
     "adxl_acc_y_kalman",
     "adxl_acc_z_kalman",
 
-    # Cosmic Aurora (12)
+    # --------------------------------------------------------
+    # 2. COSMIC AURORA (12)
+    # --------------------------------------------------------
+
     "accelx",
     "accely",
     "accelz",
@@ -89,13 +104,21 @@ EXPECTED_KEYS = [
 
     "sound_dbLeft",
     "sound_dbRight",
-    
+
+    # --------------------------------------------------------
+    # 3. LOAD CELL (5)
+    # --------------------------------------------------------
+
     "loadcell_paka",
     "loadcell_paki",
     "loadcell_leher",
     "loadcell_kaka",
     "loadcell_kaki",
-    
+
+    # --------------------------------------------------------
+    # 4. FLEX (16)
+    # --------------------------------------------------------
+
     "flex1",
     "flex2",
     "flex3",
@@ -112,7 +135,11 @@ EXPECTED_KEYS = [
     "flex14",
     "flex15",
     "flex16",
-    
+
+    # --------------------------------------------------------
+    # 5. MCP9808 (14)
+    # --------------------------------------------------------
+
     "mcp1",
     "mcp2",
     "mcp3",
@@ -127,7 +154,11 @@ EXPECTED_KEYS = [
     "mcp12",
     "mcp13",
     "mcp14",
-    
+
+    # --------------------------------------------------------
+    # 6. FSR (14)
+    # --------------------------------------------------------
+
     "fsr1",
     "fsr2",
     "fsr3",
@@ -142,7 +173,11 @@ EXPECTED_KEYS = [
     "fsr12",
     "fsr13",
     "fsr14",
-    
+
+    # --------------------------------------------------------
+    # 7. PIEZO (14)
+    # --------------------------------------------------------
+
     "piezo1",
     "piezo2",
     "piezo3",
@@ -158,139 +193,59 @@ EXPECTED_KEYS = [
     "piezo13",
     "piezo14",
 
+    # --------------------------------------------------------
+    # 8. AMG8833 (1)
+    # --------------------------------------------------------
+
     "thermal",
 ]
 
 
 # ============================================================
-# DUMMY DATA
+# ARDUINO FIELD MAPPING
 # ============================================================
 
-DUMMY_VALUES = {
-    "lidar_raw": 120.0,
+ARDUINO_MAP = {
 
-    "mq_nh3": 12.5,
-    "mq_co": 3.2,
-    "mq_co2": 400.0,
-    "smoke": 1.0,
+    "lidar_distance_cm": "lidar_raw",
 
-    "mpu_acc_x_raw": 0.12,
-    "mpu_acc_y_raw": 0.15,
-    "mpu_acc_z_raw": 9.81,
+    "mq135_nh3_ppm": "mq_nh3",
+    "mq135_co_ppm": "mq_co",
+    "mq135_co2_ppm": "mq_co2",
+    "mq2_smoke_index": "smoke",
 
-    "mpu_gyro_x_raw": 0.01,
-    "mpu_gyro_y_raw": 0.02,
-    "mpu_gyro_z_raw": 0.03,
+    "mpu_accel_x": "mpu_acc_x_raw",
+    "mpu_accel_y": "mpu_acc_y_raw",
+    "mpu_accel_z": "mpu_acc_z_raw",
 
-    "mpu_acc_x_kalman": 0.11,
-    "mpu_acc_y_kalman": 0.14,
-    "mpu_acc_z_kalman": 9.79,
+    "mpu_gyro_x": "mpu_gyro_x_raw",
+    "mpu_gyro_y": "mpu_gyro_y_raw",
+    "mpu_gyro_z": "mpu_gyro_z_raw",
 
-    "mpu_gyro_x_kalman": 0.01,
-    "mpu_gyro_y_kalman": 0.02,
-    "mpu_gyro_z_kalman": 0.03,
+    "mpu_accel_kalman_x": "mpu_acc_x_kalman",
+    "mpu_accel_kalman_y": "mpu_acc_y_kalman",
+    "mpu_accel_kalman_z": "mpu_acc_z_kalman",
 
-    "adxl_acc_x_raw": 0.12,
-    "adxl_acc_y_raw": 0.15,
-    "adxl_acc_z_raw": 9.80,
+    "mpu_gyro_kalman_x": "mpu_gyro_x_kalman",
+    "mpu_gyro_kalman_y": "mpu_gyro_y_kalman",
+    "mpu_gyro_kalman_z": "mpu_gyro_z_kalman",
 
-    "adxl_acc_x_kalman": 0.11,
-    "adxl_acc_y_kalman": 0.14,
-    "adxl_acc_z_kalman": 9.78,
+    "adxl_accel_x": "adxl_acc_x_raw",
+    "adxl_accel_y": "adxl_acc_y_raw",
+    "adxl_accel_z": "adxl_acc_z_raw",
 
-    "accelx": 0.25,
-    "accely": 0.31,
-    "accelz": 9.72,
-
-    "gyrox": 0.01,
-    "gyroy": 0.02,
-    "gyroz": 0.03,
-
-    "bme_temp": 28.5,
-    "bme_hum": 65.2,
-    "bme_pres": 1008.5,
-    "bme_alt": 120.0,
-
-    "sound_dbLeft": 42.5,
-    "sound_dbRight": 43.1,
-    
-    "loadcell_paka": 12.5,
-    "loadcell_paki": 20.2,
-    "loadcell_leher": 23.4,
-    "loadcell_kaka": 25.6,
-    "loadcell_kaki": 25.6,
-    
-    "flex1": 25.6,
-    "flex2": 25.6,
-    "flex3": 25.6,
-    "flex4": 27.6,
-    "flex5": 21.6,
-    "flex6": 25.6,
-    "flex7": 25.6,
-    "flex8": 25.6,
-    "flex9": 25.6,
-    "flex10": 25.6,
-    "flex11": 25.6,
-    "flex12": 25.6,
-    "flex13": 25.6,
-    "flex14": 25.6,
-    "flex15": 25.6,
-    "flex16": 25.6,
-    
-    "mcp1": 25.6,
-    "mcp2": 25.6,
-    "mcp3": 25.6,
-    "mcp4": 25.6,
-    "mcp5": 25.6,
-    "mcp6": 25.6,
-    "mcp7": 25.6,
-    "mcp8": 25.6,
-    "mcp9": 25.6,
-    "mcp10": 25.6,
-    "mcp11": 25.6,
-    "mcp12": 25.6,
-    "mcp13": 25.6,
-    "mcp14": 25.6,
-    
-    "fsr1": 25.6,
-    "fsr2": 25.6,
-    "fsr3": 25.6,
-    "fsr4": 25.6,
-    "fsr5": 25.6,
-    "fsr6": 25.6,
-    "fsr7": 25.6,
-    "fsr8": 25.6,
-    "fsr9": 25.6,
-    "fsr10": 25.6,
-    "fsr11": 25.6,
-    "fsr12": 25.6,
-    "fsr13": 25.6,
-    "fsr14": 25.6,
-    
-    "piezo1": 25.6,
-    "piezo2": 25.6,
-    "piezo3": 25.6,
-    "piezo4": 25.6,
-    "piezo5": 25.6,
-    "piezo6": 25.6,
-    "piezo7": 25.6,
-    "piezo8": 25.6,
-    "piezo9": 25.6,
-    "piezo10": 25.6,
-    "piezo11": 25.6,
-    "piezo12": 25.6,
-    "piezo13": 25.6,
-    "piezo14": 25.6,
-
-    "thermal": 25.6,
+    "adxl_accel_kalman_x": "adxl_acc_x_kalman",
+    "adxl_accel_kalman_y": "adxl_acc_y_kalman",
+    "adxl_accel_kalman_z": "adxl_acc_z_kalman",
 }
 
 
 # ============================================================
-# ALIAS COSMIC AURORA
+# COSMIC AURORA FIELD MAPPING
 # ============================================================
 
-AURORA_ALIASES = {
+AURORA_MAP = {
+
     "accel_x": "accelx",
     "accel_y": "accely",
     "accel_z": "accelz",
@@ -299,13 +254,13 @@ AURORA_ALIASES = {
     "gyro_y": "gyroy",
     "gyro_z": "gyroz",
 
-    "temperature": "bme_temp",
-    "humidity": "bme_hum",
-    "pressure": "bme_pres",
-    "altitude": "bme_alt",
+    "bme_temperature": "bme_temp",
+    "bme_humidity": "bme_hum",
+    "bme_pressure": "bme_pres",
+    "bme_altitude": "bme_alt",
 
-    "sound_left": "sound_dbLeft",
-    "sound_right": "sound_dbRight",
+    "sound_db_left": "sound_dbLeft",
+    "sound_db_right": "sound_dbRight",
 }
 
 
@@ -314,12 +269,15 @@ AURORA_ALIASES = {
 # ============================================================
 
 def crc16_ccitt(data: bytes) -> int:
+
     crc = 0xFFFF
 
     for byte in data:
+
         crc ^= byte << 8
 
         for _ in range(8):
+
             if crc & 0x8000:
                 crc = ((crc << 1) ^ 0x1021) & 0xFFFF
             else:
@@ -329,7 +287,7 @@ def crc16_ccitt(data: bytes) -> int:
 
 
 # ============================================================
-# VALIDASI NUMERIK
+# NUMERIC VALIDATION
 # ============================================================
 
 def valid_number(value):
@@ -337,7 +295,11 @@ def valid_number(value):
     if isinstance(value, bool):
         return None
 
+    if value is None:
+        return None
+
     try:
+
         number = float(value)
 
         if not math.isfinite(number):
@@ -359,9 +321,12 @@ class LoRaTransmitterNode(Node):
 
         super().__init__("lora_transmitter_node")
 
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
+        # Data terbaru yang sudah diterima
         self.latest_values = {}
+
+        # Data valid terakhir
         self.last_values = {}
 
         self.tx_queue = deque()
@@ -369,34 +334,80 @@ class LoRaTransmitterNode(Node):
         self.serial_port = None
         self.tx_active = False
 
-        # ROS2 subscribers
+        self.transmitted_count = 0
+        self.failed_count = 0
+
+        self.received_sources = set()
+
+        # ====================================================
+        # ROS SUBSCRIBERS
+        # ====================================================
+
+        # Arduino JSON
         self.arduino_sub = self.create_subscription(
             String,
-            "/telemetri/arduino",
+            "/telemetri/arduino/data",
             self.arduino_callback,
             10
         )
 
+        # Cosmic Aurora JSON
         self.aurora_sub = self.create_subscription(
             String,
-            "/telemetri/aurora",
+            "/telemetri/aurora/data",
             self.aurora_callback,
             10
         )
 
-        # Timer pengiriman
+        # Analog FSR, Piezo, Flex
+        self.analog_sub = self.create_subscription(
+            String,
+            "/sensors/analog_data",
+            self.analog_callback,
+            10
+        )
+
+        # MCP9808
+        self.mcp_sub = self.create_subscription(
+            String,
+            "/sensors/mcp9808",
+            self.mcp_callback,
+            10
+        )
+
+        # Load cell
+        self.loadcell_sub = self.create_subscription(
+            String,
+            "/sensors/loadcell",
+            self.loadcell_callback,
+            10
+        )
+
+        # ====================================================
+        # TIMERS
+        # ====================================================
+
         self.transmit_timer = self.create_timer(
             TRANSMIT_INTERVAL,
             self.transmit_callback
         )
 
-        # Timer antrean TX
         self.queue_timer = self.create_timer(
             0.01,
             self.process_queue
         )
 
+        # ====================================================
+        # SERIAL INITIALIZATION
+        # ====================================================
+
         self.initialize_serial()
+
+        self.get_logger().info(
+            f"LoRa node initialized | "
+            f"Fields: {len(EXPECTED_KEYS)} | "
+            f"Interval: {TRANSMIT_INTERVAL}s"
+        )
 
     # ========================================================
     # SERIAL INITIALIZATION
@@ -426,14 +437,14 @@ class LoRaTransmitterNode(Node):
 
         except Exception as error:
 
+            self.serial_port = None
+
             self.get_logger().error(
                 f"RAK connection failed: {error}"
             )
 
-            self.serial_port = None
-
     # ========================================================
-    # AT COMMAND
+    # SEND AT COMMAND
     # ========================================================
 
     def send_at(self, command, timeout=2.0):
@@ -451,10 +462,10 @@ class LoRaTransmitterNode(Node):
 
             self.serial_port.flush()
 
-            start_time = time.time()
+            start = time.monotonic()
             response = ""
 
-            while time.time() - start_time < timeout:
+            while time.monotonic() - start < timeout:
 
                 if self.serial_port.in_waiting:
 
@@ -478,10 +489,10 @@ class LoRaTransmitterNode(Node):
                         )
                         return True
 
-                time.sleep(0.05)
+                time.sleep(0.02)
 
             self.get_logger().warning(
-                f"AT timeout: {command}"
+                f"AT timeout: {command} | {response.strip()}"
             )
 
             return False
@@ -489,7 +500,7 @@ class LoRaTransmitterNode(Node):
         except Exception as error:
 
             self.get_logger().error(
-                f"AT command failed: {error}"
+                f"AT command error: {error}"
             )
 
             return False
@@ -504,9 +515,13 @@ class LoRaTransmitterNode(Node):
             return
 
         commands = [
+
             "AT",
+
             "AT+NWM=0",
+
             "AT+PRECV=0",
+
             (
                 f"AT+P2P={FREQUENCY}:"
                 f"{SPREADING_FACTOR}:"
@@ -518,30 +533,42 @@ class LoRaTransmitterNode(Node):
         ]
 
         self.get_logger().info(
-            "Configuring RAK LoRa P2P..."
+            "Configuring RAK P2P..."
         )
 
         for command in commands:
 
-            self.send_at(command)
+            success = self.send_at(command)
+
+            if not success:
+
+                self.get_logger().error(
+                    f"RAK configuration failed at: {command}"
+                )
+
+                return
+
             time.sleep(0.2)
 
         self.get_logger().info(
-            "RAK configuration sequence completed."
+            "RAK P2P configuration completed."
         )
 
     # ========================================================
-    # PARSE JSON INPUT
+    # PARSE JSON
     # ========================================================
 
     def parse_json(self, raw_data):
 
         try:
 
-            data = json.loads(raw_data)
+            result = json.loads(raw_data)
 
-            if isinstance(data, dict):
-                return data
+            if isinstance(result, dict):
+                return result
+
+            if isinstance(result, list):
+                return result
 
             return None
 
@@ -549,35 +576,77 @@ class LoRaTransmitterNode(Node):
             return None
 
     # ========================================================
-    # UPDATE SENSOR VALUES
+    # UPDATE ONE FIELD
     # ========================================================
 
-    def update_values(self, data, aliases=None):
+    def update_field(self, key, value):
+
+        if key not in EXPECTED_KEYS:
+            return False
+
+        number = valid_number(value)
+
+        if number is None:
+            return False
+
+        with self.lock:
+
+            self.latest_values[key] = number
+            self.last_values[key] = number
+
+        return True
+
+    # ========================================================
+    # UPDATE MULTIPLE FIELDS USING MAP
+    # ========================================================
+
+    def update_mapped_values(self, data, mapping):
 
         if not isinstance(data, dict):
             return
 
-        aliases = aliases or {}
+        updated = 0
 
-        with self.lock:
+        for source_key, target_key in mapping.items():
 
-            for original_key, value in data.items():
+            if source_key not in data:
+                continue
 
-                key = aliases.get(
-                    original_key,
-                    original_key
-                )
+            if self.update_field(
+                target_key,
+                data[source_key]
+            ):
+                updated += 1
 
-                if key not in EXPECTED_KEYS:
-                    continue
+        if updated > 0:
+            return updated
 
-                number = valid_number(value)
+        return 0
 
-                if number is None:
-                    continue
+    # ========================================================
+    # EXTRACT NORMALIZED JSON DATA
+    # ========================================================
 
-                self.latest_values[key] = number
-                self.last_values[key] = number
+    def extract_sensor_data(self, payload):
+
+        if not isinstance(payload, dict):
+            return None
+
+        # Struktur normal:
+        # {
+        #   "source": "...",
+        #   "status": "...",
+        #   "field_count": 25,
+        #   "data": {...}
+        # }
+
+        nested = payload.get("data")
+
+        if isinstance(nested, dict):
+            return nested
+
+        # Mendukung JSON flat bila suatu saat digunakan
+        return payload
 
     # ========================================================
     # ARDUINO CALLBACK
@@ -585,73 +654,179 @@ class LoRaTransmitterNode(Node):
 
     def arduino_callback(self, msg):
 
-        data = self.parse_json(msg.data)
+        payload = self.parse_json(msg.data)
 
-        if data is None:
-
+        if payload is None:
             self.get_logger().warning(
-                "Arduino message is not valid JSON object."
+                "Invalid Arduino JSON"
             )
-
             return
 
-        self.update_values(data)
+        data = self.extract_sensor_data(payload)
+
+        if not isinstance(data, dict):
+            return
+
+        updated = self.update_mapped_values(
+            data,
+            ARDUINO_MAP
+        )
+
+        if updated:
+
+            self.received_sources.add("arduino")
 
     # ========================================================
-    # AURORA CALLBACK
+    # COSMIC AURORA CALLBACK
     # ========================================================
 
     def aurora_callback(self, msg):
 
-        data = self.parse_json(msg.data)
+        payload = self.parse_json(msg.data)
 
-        if data is None:
-
+        if payload is None:
             self.get_logger().warning(
-                "Aurora message is not valid JSON object."
+                "Invalid Cosmic Aurora JSON"
             )
-
             return
 
-        self.update_values(
+        data = self.extract_sensor_data(payload)
+
+        if not isinstance(data, dict):
+            return
+
+        updated = self.update_mapped_values(
             data,
-            aliases=AURORA_ALIASES
+            AURORA_MAP
         )
 
+        if updated:
+
+            self.received_sources.add("aurora")
+
     # ========================================================
-    # DUMMY DATA GENERATOR
+    # ANALOG CALLBACK
     # ========================================================
 
-    def generate_dummy_values(self):
+    def analog_callback(self, msg):
 
-        dummy = {}
+        payload = self.parse_json(msg.data)
 
-        for key in EXPECTED_KEYS:
+        if not isinstance(payload, dict):
+            self.get_logger().warning(
+                "Invalid analog JSON"
+            )
+            return
 
-            base = DUMMY_VALUES[key]
+        # Struktur:
+        # {
+        #   "fsr": [...14...],
+        #   "piezo": [...14...],
+        #   "flex": [...16...]
+        # }
 
-            variation = abs(base) * 0.01
+        updated = 0
 
-            if variation == 0:
-                variation = 0.01
+        updated += self.update_array(
+            payload.get("flex"),
+            "flex"
+        )
 
-            dummy[key] = round(
-                random.uniform(
-                    base - variation,
-                    base + variation
-                ),
-                3
+        updated += self.update_array(
+            payload.get("fsr"),
+            "fsr"
+        )
+
+        updated += self.update_array(
+            payload.get("piezo"),
+            "piezo"
+        )
+
+        if updated:
+            self.received_sources.add("analog")
+
+    # ========================================================
+    # ARRAY MAPPING
+    # ========================================================
+
+    def update_array(self, values, prefix):
+
+        if not isinstance(values, list):
+            return 0
+
+        updated = 0
+
+        for index, value in enumerate(values):
+
+            key = f"{prefix}{index + 1}"
+
+            if key not in EXPECTED_KEYS:
+                continue
+
+            if self.update_field(key, value):
+                updated += 1
+
+        return updated
+
+    # ========================================================
+    # MCP9808 CALLBACK
+    # ========================================================
+
+    def mcp_callback(self, msg):
+
+        payload = self.parse_json(msg.data)
+
+        if not isinstance(payload, list):
+            self.get_logger().warning(
+                "MCP9808 data must be a JSON array"
+            )
+            return
+
+        updated = self.update_array(
+            payload,
+            "mcp"
+        )
+
+        if updated:
+            self.received_sources.add("mcp9808")
+
+    # ========================================================
+    # LOAD CELL CALLBACK
+    # ========================================================
+
+    def loadcell_callback(self, msg):
+
+        payload = self.parse_json(msg.data)
+
+        if isinstance(payload, dict):
+
+            data = payload.get("data", payload)
+
+            if not isinstance(data, dict):
+                return
+
+            mapping = {
+
+                "loadcell_paka": "loadcell_paka",
+                "loadcell_paki": "loadcell_paki",
+                "loadcell_leher": "loadcell_leher",
+                "loadcell_kaka": "loadcell_kaka",
+                "loadcell_kaki": "loadcell_kaki",
+            }
+
+            updated = self.update_mapped_values(
+                data,
+                mapping
             )
 
-        return dummy
+            if updated:
+                self.received_sources.add("loadcell")
 
     # ========================================================
-    # BUILD JSON ARRAY: 35 NUMERIC VALUES
+    # BUILD FIXED JSON ARRAY
     # ========================================================
 
     def build_packet(self):
-
-        dummy_values = self.generate_dummy_values()
 
         values = []
 
@@ -659,34 +834,21 @@ class LoRaTransmitterNode(Node):
 
             for key in EXPECTED_KEYS:
 
-                value = None
+                value = self.latest_values.get(key)
 
-                if key in self.latest_values:
-                    value = self.latest_values[key]
+                if value is None and HOLD_LAST_VALUE:
+                    value = self.last_values.get(key)
 
-                elif HOLD_LAST_VALUE and key in self.last_values:
-                    value = self.last_values[key]
+                values.append(value)
 
-                elif ENABLE_DUMMY_DATA:
-                    value = dummy_values[key]
+        # None akan menjadi null di JSON.
+        # Tidak ada dummy atau angka buatan.
 
-                else:
-                    value = 0.0
-
-                number = valid_number(value)
-
-                if number is None:
-                    number = dummy_values[key]
-
-                values.append(number)
-
-        payload = json.dumps(
+        return json.dumps(
             values,
             separators=(",", ":"),
             allow_nan=False
         )
-
-        return payload
 
     # ========================================================
     # BUILD ONE LORA FRAGMENT
@@ -698,13 +860,11 @@ class LoRaTransmitterNode(Node):
 
         crc = crc16_ccitt(json_bytes)
 
-        # CRC berada di luar JSON.
-        # Receiver menghapus *XXXX sebelum parsing JSON.
         complete_data = (
-            json_bytes + f"*{crc:04X}".encode()
+            json_bytes +
+            f"*{crc:04X}".encode("ascii")
         )
 
-        # Hanya satu fragment.
         header = b"FRG:1/1:"
 
         fragment = header + complete_data
@@ -712,21 +872,25 @@ class LoRaTransmitterNode(Node):
         if len(fragment) > MAX_PAYLOAD:
 
             raise ValueError(
-                f"Payload terlalu besar untuk satu fragment: "
-                f"{len(fragment)} bytes. "
-                f"Batas maksimal: {MAX_PAYLOAD} bytes."
+                f"Payload terlalu besar: {len(fragment)} bytes"
             )
 
         return fragment
 
     # ========================================================
-    # TRANSMIT CALLBACK
+    # TRANSMIT TIMER
     # ========================================================
 
     def transmit_callback(self):
 
         if self.serial_port is None:
             return
+
+        # Jangan kirim paket kosong sebelum menerima data sensor.
+        with self.lock:
+
+            if not self.latest_values:
+                return
 
         try:
 
@@ -735,15 +899,20 @@ class LoRaTransmitterNode(Node):
             fragment = self.fragment_packet(payload)
 
             with self.lock:
+
+                if len(self.tx_queue) >= MAX_QUEUE_SIZE:
+
+                    self.tx_queue.popleft()
+
+                    self.get_logger().warning(
+                        "Oldest packet removed from TX queue"
+                    )
+
                 self.tx_queue.append(fragment)
 
-            self.get_logger().info(
-                f"Queued 1 fragment, "
-                f"{len(payload)} JSON characters, "
-                f"{len(fragment)} bytes total."
-            )
-
         except Exception as error:
+
+            self.failed_count += 1
 
             self.get_logger().error(
                 f"Packet creation failed: {error}"
@@ -764,9 +933,9 @@ class LoRaTransmitterNode(Node):
         if not self.tx_queue:
             return
 
-        fragment = self.tx_queue.popleft()
-
         self.tx_active = True
+
+        fragment = self.tx_queue.popleft()
 
         try:
 
@@ -777,7 +946,7 @@ class LoRaTransmitterNode(Node):
             self.serial_port.reset_input_buffer()
 
             self.serial_port.write(
-                (command + "\r\n").encode()
+                (command + "\r\n").encode("ascii")
             )
 
             self.serial_port.flush()
@@ -786,20 +955,27 @@ class LoRaTransmitterNode(Node):
 
             if success:
 
+                self.transmitted_count += 1
+
                 self.get_logger().info(
-                    "LoRa fragment transmitted."
+                    f"TX success: {self.transmitted_count} | "
+                    f"Sources: {sorted(self.received_sources)}"
                 )
 
             else:
 
+                self.failed_count += 1
+
                 self.get_logger().warning(
-                    "LoRa transmission not confirmed."
+                    f"TX failed: {self.failed_count}"
                 )
 
         except Exception as error:
 
+            self.failed_count += 1
+
             self.get_logger().error(
-                f"LoRa transmission error: {error}"
+                f"LoRa TX error: {error}"
             )
 
         finally:
@@ -807,15 +983,16 @@ class LoRaTransmitterNode(Node):
             self.tx_active = False
 
     # ========================================================
-    # WAIT TX DONE
+    # WAIT TRANSMISSION CONFIRMATION
     # ========================================================
 
     def wait_tx_done(self, timeout=2.0):
 
-        start_time = time.time()
+        start = time.monotonic()
+
         response = ""
 
-        while time.time() - start_time < timeout:
+        while time.monotonic() - start < timeout:
 
             if self.serial_port.in_waiting:
 
@@ -831,11 +1008,9 @@ class LoRaTransmitterNode(Node):
                     return True
 
                 if "ERROR" in response:
-
                     self.get_logger().error(
                         response.strip()
                     )
-
                     return False
 
             time.sleep(0.02)
@@ -870,18 +1045,24 @@ def main(args=None):
 
     rclpy.init(args=args)
 
-    node = LoRaTransmitterNode()
+    node = None
 
     try:
+
+        node = LoRaTransmitterNode()
 
         rclpy.spin(node)
 
     except KeyboardInterrupt:
         pass
 
+    except Exception as error:
+        print(f"LoRa node failed: {error}")
+
     finally:
 
-        node.destroy_node()
+        if node is not None:
+            node.destroy_node()
 
         if rclpy.ok():
             rclpy.shutdown()
