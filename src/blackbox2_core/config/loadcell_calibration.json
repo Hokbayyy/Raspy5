@@ -1,7 +1,7 @@
 {
   "sensors": {
     "loadcell_1": {
-      "offset": 547198,
+      "offset": 544050,
       "scale": 191.965
     },
     "loadcell_2": {
