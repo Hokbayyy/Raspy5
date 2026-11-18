@@ -362,7 +362,7 @@ class HX711Node(Node):
 
         self.declare_parameter(
             "gpiochip",
-            GPIO_CHIP
+            GPIO_CHIP = 4
         )
 
         self.declare_parameter(
