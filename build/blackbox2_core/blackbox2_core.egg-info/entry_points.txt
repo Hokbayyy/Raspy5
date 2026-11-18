@@ -5,3 +5,4 @@ cosmic_aurora = blackbox2_core.drivers.cosmic_aurora_node:main
 hx711_node = blackbox2_core.sensors.gpio.hx711_node:main
 lora_transmitter = blackbox2_core.transport.lora_transmitter_node:main
 mcp9808_node = blackbox2_core.sensors.i2c.mcp9808_node:main
+witmotion_node = blackbox2_core.sensors.imu.witmotion_node:main

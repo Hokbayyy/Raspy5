@@ -28,6 +28,8 @@ blackbox2_core/sensors/i2c/mcp9808_driver.py
 blackbox2_core/sensors/i2c/mcp9808_manager.py
 blackbox2_core/sensors/i2c/mcp9808_node.py
 blackbox2_core/sensors/i2c/tca9548a_driver.py
+blackbox2_core/sensors/imu/__init__.py
+blackbox2_core/sensors/imu/witmotion_node.py
 blackbox2_core/sensors/uart/__init__.py
 blackbox2_core/transport/__init__.py
 blackbox2_core/transport/lora_transmitter_node.py

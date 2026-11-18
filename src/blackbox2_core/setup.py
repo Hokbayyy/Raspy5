@@ -45,6 +45,7 @@ setup(
             'mcp9808_node = blackbox2_core.sensors.i2c.mcp9808_node:main',
             'analog_sensor_node = blackbox2_core.sensors.analog_mux.analog_sensor_node:main',
             'hx711_node = blackbox2_core.sensors.gpio.hx711_node:main',
+            'witmotion_node = blackbox2_core.sensors.imu.witmotion_node:main',
         ],
     },
 )
