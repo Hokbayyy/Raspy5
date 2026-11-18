@@ -11,6 +11,7 @@ import serial
 import rclpy
 
 from rclpy.node import Node
+from sensor_msgs.msg import Imu
 from std_msgs.msg import String
 
 
@@ -44,7 +45,7 @@ MAX_QUEUE_SIZE = 3
 
 
 # ============================================================
-# FIELD ORDER - TOTAL 99 FIELD
+# FIELD ORDER - TOTAL 105 FIELD
 # URUTAN INI TIDAK BOLEH DIUBAH TANPA MENYESUAIKAN RECEIVER
 # ============================================================
 
@@ -198,6 +199,18 @@ EXPECTED_KEYS = [
     # --------------------------------------------------------
 
     "thermal",
+
+    # --------------------------------------------------------
+    # 9. WITMOTION (6)
+    # --------------------------------------------------------
+
+    "ax",
+    "ay",
+    "az",
+
+    "gx",
+    "gy",
+    "gz",
 ]
 
 
@@ -380,6 +393,14 @@ class LoRaTransmitterNode(Node):
             String,
             "/sensors/loadcell",
             self.loadcell_callback,
+            10
+        )
+
+        # WitMotion IMU (ax, ay, az, gx, gy, gz)
+        self.witmotion_sub = self.create_subscription(
+            Imu,
+            "witmotion_imu",
+            self.witmotion_imu_callback,
             10
         )
 
@@ -821,6 +842,44 @@ class LoRaTransmitterNode(Node):
 
             if updated:
                 self.received_sources.add("loadcell")
+
+    # ========================================================
+    # WITMOTION IMU CALLBACK
+    # ========================================================
+
+    def witmotion_imu_callback(self, msg):
+
+        try:
+
+            ax = round(msg.linear_acceleration.x / 9.80665, 4)
+            ay = round(msg.linear_acceleration.y / 9.80665, 4)
+            az = round(msg.linear_acceleration.z / 9.80665, 4)
+
+            gx = round(math.degrees(msg.angular_velocity.x), 4)
+            gy = round(math.degrees(msg.angular_velocity.y), 4)
+            gz = round(math.degrees(msg.angular_velocity.z), 4)
+
+            updated = 0
+
+            for key, val in (
+                ("ax", ax),
+                ("ay", ay),
+                ("az", az),
+                ("gx", gx),
+                ("gy", gy),
+                ("gz", gz),
+            ):
+                if self.update_field(key, val):
+                    updated += 1
+
+            if updated:
+                self.received_sources.add("witmotion")
+
+        except Exception as error:
+
+            self.get_logger().warning(
+                f"Invalid WitMotion IMU message: {error}"
+            )
 
     # ========================================================
     # BUILD FIXED JSON ARRAY
