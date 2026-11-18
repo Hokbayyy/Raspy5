@@ -46,5 +46,12 @@ def generate_launch_description():
             name='analog_sensor_node',
             output='screen',
         ),
+        
+        Node(
+            package='blackbox2_core',
+            executable='hx711_node',
+            name='hx711_node',
+            output='screen',
+        ),
 
     ])
