@@ -29,13 +29,13 @@ BAUD_RATE = 115200
 
 FREQUENCY = 923200000
 SPREADING_FACTOR = 6
-BANDWIDTH = 2
+BANDWIDTH = 0
 CODING_RATE = 0
 PREAMBLE = 8
 TX_POWER = 20
 
 # Kirim satu paket setiap 1 detik
-TRANSMIT_INTERVAL = 1.0
+TRANSMIT_INTERVAL = 0
 
 # Batas keras payload RAK3272S / RUI3 AT+PSEND = 239 byte (478 hex char).
 # TX wajib mengirim 1 uplink tunggal (<= 238 byte) tanpa dipecah fragmen FRG.
