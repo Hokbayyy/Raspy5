@@ -1,8 +1,11 @@
 
 #!/usr/bin/env python3
 
+import csv
+from datetime import datetime
 import json
 import math
+import os
 import time
 import threading
 from collections import deque
@@ -41,6 +44,11 @@ HOLD_LAST_VALUE = True
 
 # Maksimal antrean paket
 MAX_QUEUE_SIZE = 3
+
+# Folder log komunikasi LoRa lokal di Raspberry Pi
+DEFAULT_COMM_LOG_DIR = os.path.expanduser(
+    "~/blackbox2_ws/logs/communication"
+)
 
 
 # ============================================================
@@ -422,10 +430,16 @@ class LoRaTransmitterNode(Node):
         self.declare_parameter("mannequin_id", 1)
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "array")
+        self.declare_parameter("log_enabled", True)
+        self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
 
         self.mannequin_id = int(self.get_parameter("mannequin_id").value)
         self.boot_count = int(self.get_parameter("boot_count").value)
         self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
+        self.log_enabled = bool(self.get_parameter("log_enabled").value)
+        self.log_dir = os.path.expanduser(
+            str(self.get_parameter("log_dir").value)
+        )
         self.packet_sequence = 0
 
         self.lock = threading.RLock()
@@ -451,6 +465,13 @@ class LoRaTransmitterNode(Node):
         # Alert queue has priority over regular telemetry packets.
         self.alert_sequence = 0
         self.alert_tx_queue = deque(maxlen=10)
+
+        # Inisialisasi CSV Logger Lokal di ~/blackbox2_ws/logs/communication/
+        self.comm_csv_file = None
+        self.comm_csv_writer = None
+        self.telemetry_csv_file = None
+        self.telemetry_csv_writer = None
+        self.initialize_local_csv_logs()
 
         # Publisher JSON Compact v2 siap kirim langsung ke Web (Be-smart-manekin)
         self.web_v2_pub = self.create_publisher(
@@ -550,6 +571,159 @@ class LoRaTransmitterNode(Node):
             f"Fields: {len(EXPECTED_KEYS)} | "
             f"Interval: {TRANSMIT_INTERVAL}s"
         )
+
+    # ========================================================
+    # LOCAL COMMUNICATION CSV LOGGER (~/blackbox2_ws/logs/communication)
+    # ========================================================
+
+    def initialize_local_csv_logs(self):
+        if not self.log_enabled:
+            return
+
+        try:
+            os.makedirs(self.log_dir, exist_ok=True)
+
+            comm_path = os.path.join(
+                self.log_dir,
+                "lora_tx_communication.csv"
+            )
+            telemetry_path = os.path.join(
+                self.log_dir,
+                "lora_tx_telemetry.csv"
+            )
+
+            self.comm_csv_file = open(
+                comm_path,
+                "a",
+                newline="",
+                encoding="utf-8",
+                buffering=1
+            )
+            self.comm_csv_writer = csv.writer(self.comm_csv_file)
+            if os.path.getsize(comm_path) == 0:
+                self.comm_csv_writer.writerow([
+                    "timestamp",
+                    "tx_no",
+                    "failed_total",
+                    "mannequin_id",
+                    "packet_type",
+                    "payload_mode",
+                    "freq_hz",
+                    "sf",
+                    "bw_code",
+                    "cr_code",
+                    "preamble",
+                    "tx_power_dbm",
+                    "fragment_bytes",
+                    "crc_hex",
+                    "tx_duration_ms",
+                    "tx_status",
+                    "valid_fields",
+                    "total_fields",
+                    "active_sources",
+                ])
+
+            self.telemetry_csv_file = open(
+                telemetry_path,
+                "a",
+                newline="",
+                encoding="utf-8",
+                buffering=1
+            )
+            self.telemetry_csv_writer = csv.writer(self.telemetry_csv_file)
+            if os.path.getsize(telemetry_path) == 0:
+                self.telemetry_csv_writer.writerow([
+                    "timestamp",
+                    "tx_no",
+                    "mannequin_id",
+                    "tx_status",
+                    "fragment_bytes",
+                    "tx_duration_ms",
+                    "valid_fields",
+                    *EXPECTED_KEYS,
+                ])
+
+            self.get_logger().info(
+                f"Local LoRa TX Communication log aktif di: {self.log_dir}"
+            )
+
+        except Exception as error:
+            self.log_enabled = False
+            self.get_logger().error(
+                f"Gagal menyiapkan log komunikasi lokal: {error}"
+            )
+
+    def write_local_tx_log(
+        self,
+        fragment: bytes,
+        packet_type: str,
+        tx_status: str,
+        tx_duration_ms: float
+    ):
+        if not self.log_enabled:
+            return
+
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        crc_hex = "NONE"
+        if b"*" in fragment:
+            try:
+                crc_hex = fragment.rsplit(b"*", 1)[1].decode("ascii", errors="ignore").strip()
+            except Exception:
+                crc_hex = "NONE"
+
+        snapshot = {}
+        with self.lock:
+            for key in EXPECTED_KEYS:
+                val = self.latest_values.get(key)
+                if val is None and HOLD_LAST_VALUE:
+                    val = self.last_values.get(key)
+                snapshot[key] = val
+            sources_str = ";".join(sorted(self.received_sources))
+
+        valid_fields = sum(1 for v in snapshot.values() if v is not None)
+
+        try:
+            if self.comm_csv_writer is not None:
+                self.comm_csv_writer.writerow([
+                    timestamp,
+                    self.transmitted_count,
+                    self.failed_count,
+                    self.mannequin_id,
+                    packet_type,
+                    "alert" if packet_type == "alert" else self.payload_mode,
+                    FREQUENCY,
+                    SPREADING_FACTOR,
+                    BANDWIDTH,
+                    CODING_RATE,
+                    PREAMBLE,
+                    TX_POWER,
+                    len(fragment),
+                    crc_hex,
+                    round(tx_duration_ms, 2),
+                    tx_status,
+                    valid_fields,
+                    len(EXPECTED_KEYS),
+                    sources_str,
+                ])
+
+            if packet_type == "telemetry" and self.telemetry_csv_writer is not None:
+                self.telemetry_csv_writer.writerow([
+                    timestamp,
+                    self.transmitted_count,
+                    self.mannequin_id,
+                    tx_status,
+                    len(fragment),
+                    round(tx_duration_ms, 2),
+                    valid_fields,
+                    *[
+                        "" if snapshot.get(k) is None else snapshot.get(k)
+                        for k in EXPECTED_KEYS
+                    ],
+                ])
+        except Exception as error:
+            self.get_logger().warning(
+                f"Gagal menulis CSV log komunikasi TX: {error}"
+            )
 
     # ========================================================
     # SERIAL INITIALIZATION
@@ -1326,12 +1500,15 @@ class LoRaTransmitterNode(Node):
         # Alert packets take priority; telemetry queue remains unchanged.
         if self.alert_tx_queue:
             fragment = self.alert_tx_queue.popleft()
+            packet_type = "alert"
         elif self.tx_queue:
             fragment = self.tx_queue.popleft()
+            packet_type = "telemetry"
         else:
             return
 
         self.tx_active = True
+        tx_start = time.monotonic()
 
         try:
 
@@ -1348,19 +1525,36 @@ class LoRaTransmitterNode(Node):
             self.serial_port.flush()
 
             success = self.wait_tx_done(timeout=2.0)
+            tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
             if success:
 
                 self.transmitted_count += 1
 
+                self.write_local_tx_log(
+                    fragment=fragment,
+                    packet_type=packet_type,
+                    tx_status="SUCCESS",
+                    tx_duration_ms=tx_duration_ms
+                )
+
                 self.get_logger().info(
                     f"TX success: {self.transmitted_count} | "
+                    f"Bytes: {len(fragment)} | "
+                    f"Time: {tx_duration_ms:.1f}ms | "
                     f"Sources: {sorted(self.received_sources)}"
                 )
 
             else:
 
                 self.failed_count += 1
+
+                self.write_local_tx_log(
+                    fragment=fragment,
+                    packet_type=packet_type,
+                    tx_status="FAILED",
+                    tx_duration_ms=tx_duration_ms
+                )
 
                 self.get_logger().warning(
                     f"TX failed: {self.failed_count}"
@@ -1369,6 +1563,14 @@ class LoRaTransmitterNode(Node):
         except Exception as error:
 
             self.failed_count += 1
+            tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
+
+            self.write_local_tx_log(
+                fragment=fragment,
+                packet_type=packet_type,
+                tx_status="ERROR",
+                tx_duration_ms=tx_duration_ms
+            )
 
             self.get_logger().error(
                 f"LoRa TX error: {error}"
@@ -1424,6 +1626,14 @@ class LoRaTransmitterNode(Node):
     def destroy_node(self):
 
         self.rak_ready = False
+
+        for csv_f in (self.comm_csv_file, self.telemetry_csv_file):
+            if csv_f is not None:
+                try:
+                    csv_f.flush()
+                    csv_f.close()
+                except Exception:
+                    pass
 
         if self.serial_port is not None:
 
