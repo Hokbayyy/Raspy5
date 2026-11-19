@@ -6,11 +6,12 @@ LoRa P2P Receiver Node (ROS2) - RAK3272S + Direct Web Forwarder + Local Communic
 Fitur:
   - Mandiri 1 file utuh tanpa perlu file modul tambahan (cukup jalankan lora_rxManekin1.py).
   - Sinkron dengan parameter radio lora_txManekin1.py (923.2 MHz, SF6, BW 500 kHz, CR 4/5, Preamble 8).
-  - Menerima frame FRG:1/1:...*CRC16 maupun multi-fragmen FRG:i/N:...*CRC16 + validasi CRC16-CCITT.
-  - Mendekode 3 jenis payload dari lora_txManekin1.py:
-      1. Array JSON 109 parameter sensor (payload_mode == "array", mendukung nilai null)
-      2. Web Compact V2 JSON (payload_mode == "web_v2", readingId 1001..1095 / 2001..2095)
-      3. Alert kompak 12-byte ASCII ("A1" + seq + severity + event + status + offline_mask)
+  - Menerima paket 1-uplink langsung (B2/Z2, JSON*CRC16, Alert*CRC16) maupun frame FRG:i/N:...*CRC16 (kompatibilitas) + validasi CRC16-CCITT.
+  - Mendekode 4 jenis payload dari TX:
+      1. Biner terkompresi/ringkas B2 & Z2 1-uplink (`packed_b2` / `packed_z2`, <= 238 byte untuk seluruh 109 parameter)
+      2. Array JSON 109 parameter sensor (`payload_mode == "array"`, mendukung nilai null)
+      3. Web Compact V2 JSON (`payload_mode == "web_v2"`, readingId 1001..1095 / 2001..2095)
+      4. Alert kompak 12-byte ASCII ("A1" + seq + severity + event + status + offline_mask)
   - MENYIMPAN DATA KOMUNIKASI LORA & TELEMETRI SECARA LOKAL DI RASPBERRY PI:
       Folder default: ~/blackbox2_ws/logs/communication/ (parameter ROS2 `log_dir`):
       1. lora_rx_communication.csv : RSSI (dBm), SNR (dB), ukuran byte, fragmen, waktu reassembly (ms),
@@ -44,6 +45,7 @@ import time
 from typing import Dict, List, Optional, Tuple
 import urllib.error
 import urllib.request
+import zlib
 
 import serial
 
@@ -1600,6 +1602,108 @@ def decode_web_v2_telemetry(
     return inferred_id, sensor_dict
 
 
+PRESSED_TEMP_INDICES = frozenset({30, *range(57, 71), 99})   # int16 * 100
+PRESSED_HUM_INDICES = frozenset({31})                        # int16 * 100
+PRESSED_PRES_INDICES = frozenset({32})                       # uint16 * 50
+PRESSED_LIDAR_INDICES = frozenset({0, 1})                    # int16 * 10
+PRESSED_ALT_INDICES = frozenset({33})                        # int16 * 2
+PRESSED_RPY_INDICES = frozenset({106, 107, 108})             # int16 * 100
+F16_NAN_BYTES = b"\xFF\x7F"
+INT16_SENTINEL = -32768
+UINT16_SENTINEL = 0xFFFF
+
+
+def decode_pressed_telemetry(
+    complete_data: bytes, default_mannequin_id: int
+) -> Tuple[int, Dict[str, Optional[float]], str, str]:
+    """
+    Mendekode paket terkompresi (press) biner B2 / Z2 dari lora_transmitter_node.py.
+    Mengembalikan (mannequin_id, sensor_dict, payload_mode, crc_hex).
+    """
+    if len(complete_data) < 4:
+        raise ValueError(f"Panjang paket biner terlalu pendek: {len(complete_data)}B")
+
+    body_with_magic = complete_data[:-2]
+    expected_crc = struct.unpack(">H", complete_data[-2:])[0]
+    actual_crc = crc16_ccitt(body_with_magic)
+    if actual_crc != expected_crc:
+        raise ValueError(
+            f"CRC16 biner mismatch (dihitung {actual_crc:04X}, diterima {expected_crc:04X})"
+        )
+    crc_hex = f"{expected_crc:04X}"
+
+    if body_with_magic.startswith(b"Z2"):
+        try:
+            raw_body = zlib.decompress(body_with_magic[2:])
+        except zlib.error as exc:
+            raise ValueError(f"Gagal dekompresi Z2 zlib: {exc}") from exc
+        payload_mode = "packed_z2"
+    elif body_with_magic.startswith(b"B2"):
+        raw_body = body_with_magic[2:]
+        payload_mode = "packed_b2"
+    else:
+        raise ValueError("Header paket biner bukan B2/Z2")
+
+    if len(raw_body) < 14:
+        raise ValueError(f"Body B2 tidak lengkap: {len(raw_body)}B (<14B)")
+
+    bitmask = raw_body[:14]
+    encoded_mid = (bitmask[13] >> 5) & 0x07
+    mannequin_id = encoded_mid if encoded_mid > 0 else default_mannequin_id
+
+    active_indices = [
+        idx for idx in range(NUM_PARAMS) if (bitmask[idx >> 3] & (1 << (idx & 7)))
+    ]
+    needed_primary = 14 + 2 * len(active_indices)
+    if len(raw_body) < needed_primary:
+        raise ValueError(
+            f"Ukuran body B2 kurang ({len(raw_body)}B < {needed_primary}B)"
+        )
+    if (len(raw_body) - needed_primary) % 5 != 0:
+        raise ValueError("Ukuran overflow tail B2 tidak valid")
+
+    sensor_dict: Dict[str, Optional[float]] = {key: None for key in EXPECTED_KEYS}
+
+    offset = 14
+    for idx in active_indices:
+        chunk = raw_body[offset:offset + 2]
+        offset += 2
+        key = EXPECTED_KEYS[idx]
+
+        if idx in PRESSED_PRES_INDICES:
+            raw_u16 = struct.unpack("<H", chunk)[0]
+            if raw_u16 != UINT16_SENTINEL:
+                sensor_dict[key] = round(raw_u16 / 50.0, 2)
+        elif idx in PRESSED_TEMP_INDICES or idx in PRESSED_HUM_INDICES or idx in PRESSED_RPY_INDICES:
+            raw_i16 = struct.unpack("<h", chunk)[0]
+            if raw_i16 != INT16_SENTINEL:
+                sensor_dict[key] = round(raw_i16 / 100.0, 2)
+        elif idx in PRESSED_LIDAR_INDICES:
+            raw_i16 = struct.unpack("<h", chunk)[0]
+            if raw_i16 != INT16_SENTINEL:
+                sensor_dict[key] = round(raw_i16 / 10.0, 1)
+        elif idx in PRESSED_ALT_INDICES:
+            raw_i16 = struct.unpack("<h", chunk)[0]
+            if raw_i16 != INT16_SENTINEL:
+                sensor_dict[key] = round(raw_i16 / 2.0, 1)
+        else:
+            if chunk != F16_NAN_BYTES:
+                fval = struct.unpack("<e", chunk)[0]
+                if math.isfinite(fval):
+                    sensor_dict[key] = round(float(fval), 4)
+
+    ov_offset = needed_primary
+    while ov_offset + 5 <= len(raw_body):
+        idx, fval = struct.unpack_from("<Bf", raw_body, ov_offset)
+        ov_offset += 5
+        if idx < NUM_PARAMS:
+            valid_f = valid_number(fval)
+            if valid_f is not None:
+                sensor_dict[EXPECTED_KEYS[idx]] = round(valid_f, 4)
+
+    return mannequin_id, sensor_dict, payload_mode, crc_hex
+
+
 def build_web_v2_payload(
     sensor_dict: Dict[str, Optional[float]],
     mannequin_id: int,
@@ -1794,6 +1898,55 @@ class LoRaManekin1ReceiverNode(Node):
     ) -> None:
         self.packet_count += 1
         inter_ms, rate_hz = self._compute_inter_packet_timing()
+
+        if complete_data.startswith((b"B2", b"Z2")):
+            try:
+                mannequin_id, sensor_dict, payload_mode, crc_hex = (
+                    decode_pressed_telemetry(complete_data, self.default_mannequin_id)
+                )
+            except ValueError as exc:
+                self.crc_error_count += 1
+                self.comm_logger.log_communication(
+                    packet_no=self.packet_count,
+                    mannequin_id=self.default_mannequin_id,
+                    packet_type="crc_error",
+                    payload_mode="invalid_pressed_crc",
+                    rssi=self.last_rssi,
+                    snr=self.last_snr,
+                    radio_cfg=self.radio_config,
+                    byte_len=len(complete_data),
+                    fragments=total_frags,
+                    reassembly_ms=elapsed_ms,
+                    inter_packet_ms=inter_ms,
+                    packet_rate_hz=rate_hz,
+                    crc_status="CRC_ERROR",
+                    crc_hex="MISMATCH",
+                    crc_errors_total=self.crc_error_count,
+                    frag_timeouts_total=self.frag_timeout_count,
+                    valid_fields=0,
+                    total_fields=NUM_PARAMS,
+                    web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+                    web_ack_status=self.web_forwarder.last_ack_status,
+                    web_http_sent=self.web_forwarder.http_sent_count,
+                )
+                self.get_logger().warning(
+                    f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
+                )
+                return
+
+            self._publish_telemetry(
+                sensor_dict=sensor_dict,
+                mannequin_id=mannequin_id,
+                payload_mode=payload_mode,
+                byte_len=len(complete_data),
+                total_frags=total_frags,
+                elapsed_ms=elapsed_ms,
+                inter_ms=inter_ms,
+                rate_hz=rate_hz,
+                crc_hex=crc_hex,
+                web_v2_obj=None,
+            )
+            return
 
         try:
             payload_bytes, crc_hex = split_and_verify_crc(complete_data)

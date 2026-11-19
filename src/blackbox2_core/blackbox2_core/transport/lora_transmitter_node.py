@@ -6,8 +6,10 @@ from datetime import datetime
 import json
 import math
 import os
+import struct
 import time
 import threading
+import zlib
 from collections import deque
 
 import serial
@@ -34,15 +36,17 @@ TX_POWER = 20
 # Kirim satu paket setiap 1 detik
 TRANSMIT_INTERVAL = 1.0
 
-# Batas pemeriksaan ukuran paket di sisi gateway.
-# Pastikan juga sesuai batas payload dan konfigurasi RAK.
-MAX_PAYLOAD = 700
+# Batas keras payload RAK3272S / RUI3 AT+PSEND = 239 byte (478 hex char).
+# TX wajib mengirim 1 uplink tunggal (<= 238 byte) tanpa dipecah fragmen FRG.
+# Mode "packed" (B2/Z2) memadatkan 109 parameter menjadi <= 236..238 byte.
+MAX_SINGLE_LORA_PAYLOAD = 238
+MAX_PAYLOAD = MAX_SINGLE_LORA_PAYLOAD
 
 # Pertahankan nilai terakhir yang valid.
 # Tidak pernah membuat nilai dummy.
 HOLD_LAST_VALUE = True
 
-# Maksimal antrean paket
+# Maksimal antrean paket 1-uplink di TX queue
 MAX_QUEUE_SIZE = 3
 
 # Folder log komunikasi LoRa lokal di Raspberry Pi
@@ -369,6 +373,162 @@ WEB_READING_ID_MAP_M1 = {
 
 GRAVITY_MS2 = 9.80665
 
+# ============================================================
+# BINARY PRESSED CODEC CONSTANTS (MODE "packed" <= 236 BYTE)
+# ============================================================
+
+PRESSED_TEMP_INDICES = frozenset({30, *range(57, 71), 99})   # int16 * 100 (0.01 C)
+PRESSED_HUM_INDICES = frozenset({31})                        # int16 * 100 (0.01 %)
+PRESSED_PRES_INDICES = frozenset({32})                       # uint16 * 50 (0.02 hPa)
+PRESSED_LIDAR_INDICES = frozenset({0, 1})                    # int16 * 10  (0.1 cm)
+PRESSED_ALT_INDICES = frozenset({33})                        # int16 * 2   (0.5 m)
+PRESSED_RPY_INDICES = frozenset({106, 107, 108})             # int16 * 100 (0.01 deg)
+
+F16_NAN_BYTES = b"\xFF\x7F"
+INT16_SENTINEL = -32768
+UINT16_SENTINEL = 0xFFFF
+
+
+def encode_pressed_parts(values, mannequin_id: int = 1):
+    """
+    Menyiapkan komponen biner B2:
+      - bitmask (14 byte: bit 0..108 valid/null, bit 109..111 mannequin_id 1..7)
+      - primary_bytes (2 byte per nilai aktif, total maks 218 byte)
+      - overflow_chunks (list entry <uint8 idx, float32 val> 5 byte)
+    """
+    bitmask = bytearray(14)
+    bitmask[13] = (mannequin_id & 0x07) << 5
+
+    primary_chunks = []
+    overflow_chunks = []
+
+    for idx, raw_val in enumerate(values):
+        val = valid_number(raw_val)
+        if val is None:
+            continue
+
+        bitmask[idx >> 3] |= (1 << (idx & 7))
+
+        if idx in PRESSED_PRES_INDICES:
+            scaled = int(round(val * 50.0))
+            if 0 <= scaled < UINT16_SENTINEL:
+                primary_chunks.append(struct.pack("<H", scaled))
+            else:
+                primary_chunks.append(struct.pack("<H", UINT16_SENTINEL))
+                overflow_chunks.append(struct.pack("<Bf", idx, val))
+        elif idx in PRESSED_TEMP_INDICES or idx in PRESSED_HUM_INDICES or idx in PRESSED_RPY_INDICES:
+            scaled = int(round(val * 100.0))
+            if -32767 <= scaled <= 32767:
+                primary_chunks.append(struct.pack("<h", scaled))
+            else:
+                primary_chunks.append(struct.pack("<h", INT16_SENTINEL))
+                overflow_chunks.append(struct.pack("<Bf", idx, val))
+        elif idx in PRESSED_LIDAR_INDICES:
+            scaled = int(round(val * 10.0))
+            if -32767 <= scaled <= 32767:
+                primary_chunks.append(struct.pack("<h", scaled))
+            else:
+                primary_chunks.append(struct.pack("<h", INT16_SENTINEL))
+                overflow_chunks.append(struct.pack("<Bf", idx, val))
+        elif idx in PRESSED_ALT_INDICES:
+            scaled = int(round(val * 2.0))
+            if -32767 <= scaled <= 32767:
+                primary_chunks.append(struct.pack("<h", scaled))
+            else:
+                primary_chunks.append(struct.pack("<h", INT16_SENTINEL))
+                overflow_chunks.append(struct.pack("<Bf", idx, val))
+        else:
+            try:
+                packed_f16 = struct.pack("<e", val)
+                check_f16 = struct.unpack("<e", packed_f16)[0]
+                if packed_f16 != F16_NAN_BYTES and math.isfinite(check_f16):
+                    primary_chunks.append(packed_f16)
+                else:
+                    primary_chunks.append(F16_NAN_BYTES)
+                    overflow_chunks.append(struct.pack("<Bf", idx, val))
+            except (OverflowError, ValueError):
+                primary_chunks.append(F16_NAN_BYTES)
+                overflow_chunks.append(struct.pack("<Bf", idx, val))
+
+    return bytes(bitmask), b"".join(primary_chunks), overflow_chunks
+
+
+def encode_pressed_body(values, mannequin_id: int = 1) -> bytes:
+    """
+    Memadatkan (press) 109 nilai telemetry menjadi biner kompak B2:
+      - 14 byte bitmask + 2 byte per nilai aktif + overflow tail <Bf>.
+    Ukuran tanpa overflow saat 109 field penuh = 14 + 218 = 232 byte body.
+    """
+    bitmask, primary_bytes, overflow_chunks = encode_pressed_parts(
+        values, mannequin_id=mannequin_id
+    )
+    return bitmask + primary_bytes + b"".join(overflow_chunks)
+
+
+def _pack_pressed_candidate(raw_body: bytes, allow_zlib: bool) -> bytes:
+    """Membungkus body menjadi frame B2 (atau Z2 zlib bila lebih kecil)."""
+    b2_head_body = b"B2" + raw_body
+    b2_frame = b2_head_body + struct.pack(">H", crc16_ccitt(b2_head_body))
+
+    if allow_zlib:
+        try:
+            z_body = zlib.compress(raw_body, 9)
+            z2_head_body = b"Z2" + z_body
+            z2_frame = z2_head_body + struct.pack(">H", crc16_ccitt(z2_head_body))
+            if len(z2_frame) < len(b2_frame):
+                return z2_frame
+        except Exception:
+            pass
+
+    return b2_frame
+
+
+def build_pressed_frame(
+    values,
+    mannequin_id: int = 1,
+    allow_zlib: bool = True,
+    max_bytes: int = MAX_SINGLE_LORA_PAYLOAD,
+) -> bytes:
+    """
+    Membungkus body biner menjadi 1 frame uplink tunggal siap kirim LoRa:
+      - B2 + body + CRC16(2B)   [maks 236 byte untuk 109 sensor tanpa overflow]
+      - Z2 + zlib(body) + CRC16 [dipakai otomatis jika hasil kompresi lebih kecil]
+    Jika max_bytes diset (default 238 byte), overflow tail yang melebihi budget
+    dipangkas otomatis (binary search jumlah maksimal tail) agar selalu <= 1 uplink.
+    """
+    bitmask, primary_bytes, overflow_chunks = encode_pressed_parts(
+        values, mannequin_id=mannequin_id
+    )
+    base_bytes = bitmask + primary_bytes
+
+    full_frame = _pack_pressed_candidate(
+        base_bytes + b"".join(overflow_chunks),
+        allow_zlib=allow_zlib,
+    )
+    if max_bytes is None or len(full_frame) <= max_bytes:
+        return full_frame
+
+    if not overflow_chunks:
+        return full_frame
+
+    best_frame = _pack_pressed_candidate(base_bytes, allow_zlib=allow_zlib)
+    lo = 1
+    hi = len(overflow_chunks) - 1
+
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        candidate = _pack_pressed_candidate(
+            base_bytes + b"".join(overflow_chunks[:mid]),
+            allow_zlib=allow_zlib,
+        )
+        if len(candidate) <= max_bytes:
+            best_frame = candidate
+            lo = mid + 1
+        else:
+            hi = mid - 1
+
+    return best_frame
+
 
 # ============================================================
 # CRC16-CCITT
@@ -429,7 +589,7 @@ class LoRaTransmitterNode(Node):
 
         self.declare_parameter("mannequin_id", 1)
         self.declare_parameter("boot_count", 1)
-        self.declare_parameter("payload_mode", "array")
+        self.declare_parameter("payload_mode", "packed")
         self.declare_parameter("log_enabled", True)
         self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
 
@@ -459,6 +619,7 @@ class LoRaTransmitterNode(Node):
 
         self.transmitted_count = 0
         self.failed_count = 0
+        self._last_single_uplink_warn = 0.0
 
         self.received_sources = set()
 
@@ -665,11 +826,22 @@ class LoRaTransmitterNode(Node):
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         crc_hex = "NONE"
-        if b"*" in fragment:
+        if fragment.startswith((b"B2", b"Z2")) and len(fragment) >= 4:
+            crc_hex = f"{struct.unpack('>H', fragment[-2:])[0]:04X}"
+        elif b"*" in fragment:
             try:
                 crc_hex = fragment.rsplit(b"*", 1)[1].decode("ascii", errors="ignore").strip()
             except Exception:
                 crc_hex = "NONE"
+
+        if packet_type == "alert":
+            logged_mode = "alert"
+        elif fragment.startswith(b"Z2"):
+            logged_mode = "packed_z2"
+        elif fragment.startswith(b"B2"):
+            logged_mode = "packed_b2"
+        else:
+            logged_mode = self.payload_mode
 
         snapshot = {}
         with self.lock:
@@ -690,7 +862,7 @@ class LoRaTransmitterNode(Node):
                     self.failed_count,
                     self.mannequin_id,
                     packet_type,
-                    "alert" if packet_type == "alert" else self.payload_mode,
+                    logged_mode,
                     FREQUENCY,
                     SPREADING_FACTOR,
                     BANDWIDTH,
@@ -1266,7 +1438,7 @@ class LoRaTransmitterNode(Node):
 
         Layout: A1 + sequence(4 hex) + severity(1 hex) +
                 event(2 hex) + status(1 hex) + offline-mask(2 hex).
-        CRC16 and FRG header are added by fragment_packet().
+        CRC16 is appended by fragment_packet() (1 single uplink, no FRG split).
         """
         try:
             alert = json.loads(msg.data)
@@ -1346,7 +1518,7 @@ class LoRaTransmitterNode(Node):
     # BUILD FIXED JSON ARRAY
     # ========================================================
 
-    def build_packet(self):
+    def _collect_ordered_values(self):
 
         values = []
 
@@ -1361,6 +1533,12 @@ class LoRaTransmitterNode(Node):
 
                 values.append(value)
 
+        return values
+
+    def build_packet(self):
+
+        values = self._collect_ordered_values()
+
         # None akan menjadi null di JSON.
         # Tidak ada dummy atau angka buatan.
 
@@ -1368,6 +1546,17 @@ class LoRaTransmitterNode(Node):
             values,
             separators=(",", ":"),
             allow_nan=False
+        )
+
+    def build_pressed_packet(self):
+
+        values = self._collect_ordered_values()
+
+        return build_pressed_frame(
+            values,
+            mannequin_id=self.mannequin_id,
+            allow_zlib=True,
+            max_bytes=MAX_SINGLE_LORA_PAYLOAD,
         )
 
     # ========================================================
@@ -1409,31 +1598,60 @@ class LoRaTransmitterNode(Node):
         )
 
     # ========================================================
-    # BUILD ONE LORA FRAGMENT
+    # SINGLE-UPLINK LORA FRAME BUILDER (TANPA MULTI-FRAGMEN FRG)
     # ========================================================
 
+    def _warn_single_uplink_fallback(self, reason: str):
+        now = time.monotonic()
+        last_warn = getattr(self, "_last_single_uplink_warn", 0.0)
+        if now - last_warn >= 30.0:
+            self._last_single_uplink_warn = now
+            self.get_logger().warning(reason)
+
+    @staticmethod
+    def _frame_ascii_payload(payload: str) -> bytes:
+        raw_bytes = payload.encode("utf-8")
+        crc = crc16_ccitt(raw_bytes)
+        return raw_bytes + f"*{crc:04X}".encode("ascii")
+
     def fragment_packet(self, payload):
+        """Membungkus 1 paket uplink utuh (<= 238 byte), tanpa dipecah fragmen."""
+        if isinstance(payload, (bytes, bytearray)):
+            complete_data = bytes(payload)
+        else:
+            complete_data = self._frame_ascii_payload(payload)
 
-        json_bytes = payload.encode("utf-8")
-
-        crc = crc16_ccitt(json_bytes)
-
-        complete_data = (
-            json_bytes +
-            f"*{crc:04X}".encode("ascii")
-        )
-
-        header = b"FRG:1/1:"
-
-        fragment = header + complete_data
-
-        if len(fragment) > MAX_PAYLOAD:
-
+        if len(complete_data) > MAX_SINGLE_LORA_PAYLOAD:
             raise ValueError(
-                f"Payload terlalu besar: {len(fragment)} bytes"
+                f"Payload melebihi batas 1 uplink LoRa "
+                f"({len(complete_data)} > {MAX_SINGLE_LORA_PAYLOAD} bytes)"
             )
 
-        return fragment
+        return complete_data
+
+    def build_fragments(self, payload):
+        """Selalu mengembalikan 1 uplink tunggal (tidak pernah memecah ke multi-fragmen)."""
+        return [self.fragment_packet(payload)]
+
+    def build_single_uplink_packet(self, web_v2_json: str = None) -> bytes:
+        """Menghasilkan tepat 1 paket uplink LoRa (<= 238 byte)."""
+        if self.payload_mode in ("packed", "compressed", "binary", "b2"):
+            return self.build_pressed_packet()
+
+        raw_json = (
+            web_v2_json if (self.payload_mode == "web_v2" and web_v2_json is not None)
+            else (self.build_web_v2_packet() if self.payload_mode == "web_v2" else self.build_packet())
+        )
+        framed_json = self._frame_ascii_payload(raw_json)
+        if len(framed_json) <= MAX_SINGLE_LORA_PAYLOAD:
+            return framed_json
+
+        self._warn_single_uplink_fallback(
+            f"payload_mode='{self.payload_mode}' ({len(framed_json)}B) melebihi batas "
+            f"{MAX_SINGLE_LORA_PAYLOAD}B dan fragmentasi TX dinonaktifkan; "
+            "otomatis dikirim dalam 1 uplink packed (B2/Z2)."
+        )
+        return self.build_pressed_packet()
 
     # ========================================================
     # TRANSMIT TIMER
@@ -1458,16 +1676,11 @@ class LoRaTransmitterNode(Node):
             if self.serial_port is None:
                 return
 
-            if self.payload_mode == "web_v2":
-                payload = web_v2_json
-            else:
-                payload = self.build_packet()
-
-            fragment = self.fragment_packet(payload)
+            packet = self.build_single_uplink_packet(web_v2_json=web_v2_json)
 
             with self.lock:
 
-                if len(self.tx_queue) >= MAX_QUEUE_SIZE:
+                while len(self.tx_queue) >= MAX_QUEUE_SIZE and self.tx_queue:
 
                     self.tx_queue.popleft()
 
@@ -1475,7 +1688,7 @@ class LoRaTransmitterNode(Node):
                         "Oldest packet removed from TX queue"
                     )
 
-                self.tx_queue.append(fragment)
+                self.tx_queue.append(packet)
 
         except Exception as error:
 
