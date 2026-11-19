@@ -11,7 +11,6 @@ import serial
 import rclpy
 
 from rclpy.node import Node
-from sensor_msgs.msg import Imu
 from std_msgs.msg import String
 
 
@@ -45,7 +44,7 @@ MAX_QUEUE_SIZE = 3
 
 
 # ============================================================
-# FIELD ORDER - TOTAL 105 FIELD
+# FIELD ORDER - TOTAL 108 FIELD
 # URUTAN INI TIDAK BOLEH DIUBAH TANPA MENYESUAIKAN RECEIVER
 # ============================================================
 
@@ -201,7 +200,7 @@ EXPECTED_KEYS = [
     "thermal",
 
     # --------------------------------------------------------
-    # 9. WITMOTION (6)
+    # 9. WITMOTION WT901 (9)
     # --------------------------------------------------------
 
     "ax",
@@ -211,6 +210,10 @@ EXPECTED_KEYS = [
     "gx",
     "gy",
     "gz",
+
+    "roll",
+    "pitch",
+    "yaw",
 ]
 
 
@@ -402,11 +405,11 @@ class LoRaTransmitterNode(Node):
             10
         )
 
-        # WitMotion IMU (ax, ay, az, gx, gy, gz)
+        # WitMotion WT901 JSON (/sensors/witmotion)
         self.witmotion_sub = self.create_subscription(
-            Imu,
-            "witmotion_imu",
-            self.witmotion_imu_callback,
+            String,
+            "/sensors/witmotion",
+            self.witmotion_callback,
             10
         )
 
@@ -859,42 +862,71 @@ class LoRaTransmitterNode(Node):
                 self.received_sources.add("loadcell")
 
     # ========================================================
-    # WITMOTION IMU CALLBACK
+    # WITMOTION JSON CALLBACK (/sensors/witmotion)
     # ========================================================
 
-    def witmotion_imu_callback(self, msg):
+    def witmotion_callback(self, msg):
 
-        try:
+        payload = self.parse_json(msg.data)
 
-            ax = round(msg.linear_acceleration.x / 9.80665, 4)
-            ay = round(msg.linear_acceleration.y / 9.80665, 4)
-            az = round(msg.linear_acceleration.z / 9.80665, 4)
-
-            gx = round(math.degrees(msg.angular_velocity.x), 4)
-            gy = round(math.degrees(msg.angular_velocity.y), 4)
-            gz = round(math.degrees(msg.angular_velocity.z), 4)
-
-            updated = 0
-
-            for key, val in (
-                ("ax", ax),
-                ("ay", ay),
-                ("az", az),
-                ("gx", gx),
-                ("gy", gy),
-                ("gz", gz),
-            ):
-                if self.update_field(key, val):
-                    updated += 1
-
-            if updated:
-                self.received_sources.add("witmotion")
-
-        except Exception as error:
-
+        if not isinstance(payload, dict):
             self.get_logger().warning(
-                f"Invalid WitMotion IMU message: {error}"
+                "Invalid WitMotion JSON"
             )
+            return
+
+        # Saat masih auto-calibration (status == "calibrating"),
+        # witmotion_node hanya mengirim progress kalibrasi tanpa field data.
+        status = str(payload.get("status", "")).lower()
+        if status == "calibrating":
+            return
+
+        data = self.extract_sensor_data(payload)
+
+        if not isinstance(data, dict):
+            return
+
+        accel = data.get("accel")
+        gyro = data.get("gyro")
+        euler = data.get("euler")
+
+        candidates = {}
+
+        if isinstance(accel, dict):
+            candidates["ax"] = accel.get("x")
+            candidates["ay"] = accel.get("y")
+            candidates["az"] = accel.get("z")
+        else:
+            candidates["ax"] = data.get("accel_x", data.get("ax"))
+            candidates["ay"] = data.get("accel_y", data.get("ay"))
+            candidates["az"] = data.get("accel_z", data.get("az"))
+
+        if isinstance(gyro, dict):
+            candidates["gx"] = gyro.get("x")
+            candidates["gy"] = gyro.get("y")
+            candidates["gz"] = gyro.get("z")
+        else:
+            candidates["gx"] = data.get("gyro_x", data.get("gx"))
+            candidates["gy"] = data.get("gyro_y", data.get("gy"))
+            candidates["gz"] = data.get("gyro_z", data.get("gz"))
+
+        if isinstance(euler, dict):
+            candidates["roll"] = euler.get("roll")
+            candidates["pitch"] = euler.get("pitch")
+            candidates["yaw"] = euler.get("yaw")
+        else:
+            candidates["roll"] = data.get("roll")
+            candidates["pitch"] = data.get("pitch")
+            candidates["yaw"] = data.get("yaw")
+
+        updated = 0
+
+        for key, val in candidates.items():
+            if self.update_field(key, val):
+                updated += 1
+
+        if updated:
+            self.received_sources.add("witmotion")
 
     # ========================================================
     # COMPACT ALERT ENCODER
