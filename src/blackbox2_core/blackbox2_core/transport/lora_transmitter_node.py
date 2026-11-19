@@ -346,6 +346,8 @@ class LoRaTransmitterNode(Node):
 
         self.serial_port = None
         self.tx_active = False
+        self.rak_ready = False
+        self.rak_retry_interval = 10.0
 
         self.transmitted_count = 0
         self.failed_count = 0
@@ -430,6 +432,12 @@ class LoRaTransmitterNode(Node):
             self.process_queue
         )
 
+        # Retry RAK initialization while acquisition/ROS continues.
+        self.rak_retry_timer = self.create_timer(
+            self.rak_retry_interval,
+            self.retry_rak_connection
+        )
+
         # ====================================================
         # SERIAL INITIALIZATION
         # ====================================================
@@ -447,95 +455,81 @@ class LoRaTransmitterNode(Node):
     # ========================================================
 
     def initialize_serial(self):
-
+        """Open UART3 and configure the RAK. Failure does not stop ROS."""
         try:
-
-            self.serial_port = serial.Serial(
-                port=SERIAL_PORT,
-                baudrate=BAUD_RATE,
-                timeout=0.1,
-                write_timeout=1
-            )
-
-            time.sleep(1)
+            if self.serial_port is None or not self.serial_port.is_open:
+                self.serial_port = serial.Serial(
+                    port=SERIAL_PORT,
+                    baudrate=BAUD_RATE,
+                    timeout=0.1,
+                    write_timeout=1
+                )
+                # Give the UART/module time to settle after opening.
+                time.sleep(1.0)
+                self.get_logger().info(
+                    f"UART opened: {SERIAL_PORT} @ {BAUD_RATE} baud"
+                )
 
             self.serial_port.reset_input_buffer()
             self.serial_port.reset_output_buffer()
-
-            self.get_logger().info(
-                f"RAK connected: {SERIAL_PORT}"
-            )
-
-            self.configure_rak()
+            self.rak_ready = self.configure_rak()
+            return self.rak_ready
 
         except Exception as error:
-
-            self.serial_port = None
-
+            self.rak_ready = False
             self.get_logger().error(
-                f"RAK connection failed: {error}"
+                f"RAK UART initialization failed: {error}"
             )
+            return False
+
+    def retry_rak_connection(self):
+        """Retry configuration periodically without blocking sensor nodes."""
+        if self.rak_ready:
+            return
+        self.get_logger().warning(
+            f"RAK not ready; retrying {SERIAL_PORT} initialization..."
+        )
+        self.initialize_serial()
 
     # ========================================================
     # SEND AT COMMAND
     # ========================================================
 
-    def send_at(self, command, timeout=2.0):
-
-        if self.serial_port is None:
+    def send_at(self, command, timeout=3.0):
+        if self.serial_port is None or not self.serial_port.is_open:
             return False
 
         try:
-
             self.serial_port.reset_input_buffer()
-
-            self.serial_port.write(
-                (command + "\r\n").encode()
-            )
-
+            self.serial_port.write((command + "\r\n").encode("ascii"))
             self.serial_port.flush()
 
             start = time.monotonic()
             response = ""
-
             while time.monotonic() - start < timeout:
-
-                if self.serial_port.in_waiting:
-
-                    data = self.serial_port.read(
-                        self.serial_port.in_waiting
-                    )
-
-                    response += data.decode(
+                waiting = self.serial_port.in_waiting
+                if waiting:
+                    response += self.serial_port.read(waiting).decode(
                         errors="ignore"
                     )
-
-                    if "ERROR" in response:
+                    upper_response = response.upper()
+                    if "ERROR" in upper_response:
                         self.get_logger().error(
-                            f"AT error: {response.strip()}"
+                            f"AT error [{command}]: {response.strip()}"
                         )
                         return False
-
-                    if "OK" in response:
-                        self.get_logger().info(
-                            f"AT OK: {command}"
-                        )
+                    if "OK" in upper_response:
+                        self.get_logger().info(f"AT OK: {command}")
                         return True
-
                 time.sleep(0.02)
 
             self.get_logger().warning(
-                f"AT timeout: {command} | {response.strip()}"
+                f"AT timeout: {command} | response={response.strip()!r}"
             )
-
             return False
 
         except Exception as error:
-
-            self.get_logger().error(
-                f"AT command error: {error}"
-            )
-
+            self.get_logger().error(f"AT command error [{command}]: {error}")
             return False
 
     # ========================================================
@@ -543,18 +537,14 @@ class LoRaTransmitterNode(Node):
     # ========================================================
 
     def configure_rak(self):
-
-        if self.serial_port is None:
-            return
+        if self.serial_port is None or not self.serial_port.is_open:
+            self.rak_ready = False
+            return False
 
         commands = [
-
             "AT",
-
             "AT+NWM=0",
-
             "AT+PRECV=0",
-
             (
                 f"AT+P2P={FREQUENCY}:"
                 f"{SPREADING_FACTOR}:"
@@ -565,27 +555,40 @@ class LoRaTransmitterNode(Node):
             ),
         ]
 
+        self.rak_ready = False
         self.get_logger().info(
-            "Configuring RAK P2P..."
+            f"Configuring RAK P2P on {SERIAL_PORT} "
+            f"({FREQUENCY} Hz, SF{SPREADING_FACTOR})..."
         )
 
         for command in commands:
-
-            success = self.send_at(command)
+            success = False
+            # A brief retry helps with module wake-up/boot timing.
+            for attempt in range(1, 4):
+                if self.send_at(command, timeout=3.0):
+                    success = True
+                    break
+                if attempt < 3:
+                    self.get_logger().warning(
+                        f"Retry AT command {attempt + 1}/3: {command}"
+                    )
+                    time.sleep(0.5)
 
             if not success:
-
                 self.get_logger().error(
-                    f"RAK configuration failed at: {command}"
+                    f"RAK configuration failed at: {command}; "
+                    f"TX is disabled until configuration succeeds"
                 )
+                self.rak_ready = False
+                return False
 
-                return
+            time.sleep(0.25)
 
-            time.sleep(0.2)
-
+        self.rak_ready = True
         self.get_logger().info(
-            "RAK P2P configuration completed."
+            "RAK P2P READY. Telemetry and alert transmission enabled."
         )
+        return True
 
     # ========================================================
     # PARSE JSON
@@ -1080,7 +1083,7 @@ class LoRaTransmitterNode(Node):
 
     def process_queue(self):
 
-        if self.serial_port is None:
+        if self.serial_port is None or not self.rak_ready:
             return
 
         if self.tx_active:
@@ -1185,6 +1188,8 @@ class LoRaTransmitterNode(Node):
     # ========================================================
 
     def destroy_node(self):
+
+        self.rak_ready = False
 
         if self.serial_port is not None:
 
