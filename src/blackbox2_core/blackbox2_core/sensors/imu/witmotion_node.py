@@ -5,6 +5,7 @@ import os
 import csv
 import json
 import math
+import time
 import struct
 import serial
 
@@ -20,6 +21,10 @@ from std_msgs.msg import String
 
 class WitMotionNode(Node):
 
+    # =========================================================
+    # WT901 FRAME
+    # =========================================================
+
     FRAME_HEADER = b'\x55\x61'
     FRAME_LENGTH = 28
 
@@ -29,46 +34,56 @@ class WitMotionNode(Node):
 
     GRAVITY = 9.80665
 
+    # =========================================================
+    # INITIALIZATION
+    # =========================================================
+
     def __init__(self):
+
         super().__init__('witmotion_hwt901b_node')
 
-        # =====================================================
+        # -----------------------------------------------------
         # PARAMETERS
-        # =====================================================
+        # -----------------------------------------------------
 
         self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('polling_rate', 20.0)
         self.declare_parameter('serial_timeout', 0.01)
 
-        self.port = self.get_parameter(
-            'port'
-        ).value
+        self.declare_parameter('calibration_duration', 120.0)
+        self.declare_parameter('gyro_motion_threshold', 10.0)
+        self.declare_parameter('accel_tolerance', 2.0)
 
-        self.baudrate = self.get_parameter(
-            'baudrate'
-        ).value
+        self.port = self.get_parameter('port').value
+        self.baudrate = self.get_parameter('baudrate').value
+        self.polling_rate = self.get_parameter('polling_rate').value
+        self.serial_timeout = self.get_parameter('serial_timeout').value
 
-        self.polling_rate = self.get_parameter(
-            'polling_rate'
-        ).value
+        self.calibration_duration = float(
+            self.get_parameter('calibration_duration').value
+        )
 
-        self.serial_timeout = self.get_parameter(
-            'serial_timeout'
-        ).value
+        self.gyro_motion_threshold = float(
+            self.get_parameter('gyro_motion_threshold').value
+        )
 
-        # =====================================================
+        self.accel_tolerance = float(
+            self.get_parameter('accel_tolerance').value
+        )
+
+        # -----------------------------------------------------
         # SERIAL
-        # =====================================================
+        # -----------------------------------------------------
 
         self.serial_port = None
         self.rx_buffer = bytearray()
 
         self.connect_serial()
 
-        # =====================================================
+        # -----------------------------------------------------
         # ROS PUBLISHERS
-        # =====================================================
+        # -----------------------------------------------------
 
         self.imu_pub = self.create_publisher(
             Imu,
@@ -88,18 +103,15 @@ class WitMotionNode(Node):
             10
         )
 
-        # =====================================================
-        # CSV LOGGER
-        # =====================================================
+        # -----------------------------------------------------
+        # CSV
+        # -----------------------------------------------------
 
         self.csv_dir = os.path.expanduser(
             '~/blackbox2_ws/logs/imu'
         )
 
-        os.makedirs(
-            self.csv_dir,
-            exist_ok=True
-        )
+        os.makedirs(self.csv_dir, exist_ok=True)
 
         self.csv_path = os.path.join(
             self.csv_dir,
@@ -113,11 +125,10 @@ class WitMotionNode(Node):
             buffering=1
         )
 
-        self.csv_writer = csv.writer(
-            self.csv_file
-        )
+        self.csv_writer = csv.writer(self.csv_file)
 
         if os.path.getsize(self.csv_path) == 0:
+
             self.csv_writer.writerow([
                 'timestamp',
                 'accel_x', 'accel_y', 'accel_z',
@@ -125,17 +136,51 @@ class WitMotionNode(Node):
                 'roll', 'pitch', 'yaw'
             ])
 
-        # =====================================================
-        # FRAME CONFIGURATION
-        # =====================================================
+        # -----------------------------------------------------
+        # CALIBRATION STORAGE
+        # -----------------------------------------------------
 
-        self.frame_id = 'imu_link'
+        self.config_dir = os.path.expanduser(
+            '~/.config/smart_mannequin'
+        )
+
+        os.makedirs(self.config_dir, exist_ok=True)
+
+        self.calibration_path = os.path.join(
+            self.config_dir,
+            'witmotion_calibration.json'
+        )
+
+        # -----------------------------------------------------
+        # CALIBRATION STATE
+        # -----------------------------------------------------
+
+        self.calibration_state = 'waiting_for_sensor'
+
+        self.calibration_start_time = None
+
+        self.gyro_sum = [0.0, 0.0, 0.0]
+        self.gyro_sample_count = 0
+
+        self.gyro_bias = [0.0, 0.0, 0.0]
+
+        self.calibration_progress = 0.0
+        self.calibration_completed = False
+
+        self.last_status_publish = 0.0
 
         self.frame_count = 0
         self.error_count = 0
 
+        self.frame_id = 'imu_link'
+
+        # -----------------------------------------------------
+        # TIMER
+        # -----------------------------------------------------
+
         timer_period = 1.0 / max(
-            float(self.polling_rate), 1.0
+            float(self.polling_rate),
+            1.0
         )
 
         self.timer = self.create_timer(
@@ -144,19 +189,19 @@ class WitMotionNode(Node):
         )
 
         self.get_logger().info(
-            'WT901SDCL-BT50 node started'
+            'WT901 Startup Auto-Calibration initialized'
         )
 
         self.get_logger().info(
-            f'Serial: {self.port} @ {self.baudrate}'
+            f'USB: {self.port} @ {self.baudrate}'
         )
 
         self.get_logger().info(
-            f'CSV: {self.csv_path}'
+            f'Calibration duration: {self.calibration_duration:.0f} seconds'
         )
 
         self.get_logger().info(
-            'JSON topic: /sensors/witmotion'
+            'Waiting for sensor data...'
         )
 
     # =========================================================
@@ -165,7 +210,11 @@ class WitMotionNode(Node):
 
     def connect_serial(self):
 
+        if self.serial_port is not None:
+            return
+
         try:
+
             self.serial_port = serial.Serial(
                 port=self.port,
                 baudrate=self.baudrate,
@@ -185,8 +234,8 @@ class WitMotionNode(Node):
 
             self.serial_port = None
 
-            self.get_logger().error(
-                f'Serial connection failed: {error}'
+            self.get_logger().warning(
+                f'Waiting for USB sensor: {error}'
             )
 
     # =========================================================
@@ -196,6 +245,8 @@ class WitMotionNode(Node):
     def read_serial(self):
 
         if self.serial_port is None:
+
+            self.connect_serial()
             return
 
         try:
@@ -204,9 +255,7 @@ class WitMotionNode(Node):
 
             if waiting > 0:
 
-                incoming = self.serial_port.read(
-                    waiting
-                )
+                incoming = self.serial_port.read(waiting)
 
                 self.rx_buffer.extend(incoming)
 
@@ -221,7 +270,7 @@ class WitMotionNode(Node):
             self.error_count += 1
 
             self.get_logger().error(
-                f'Serial read error: {error}'
+                f'Serial error: {error}'
             )
 
             try:
@@ -230,6 +279,7 @@ class WitMotionNode(Node):
                 pass
 
             self.serial_port = None
+            self.rx_buffer.clear()
 
     # =========================================================
     # FRAME PARSER
@@ -243,10 +293,8 @@ class WitMotionNode(Node):
                 self.FRAME_HEADER
             )
 
-            # Header not found
             if header_index < 0:
 
-                # Preserve possible first header byte
                 if self.rx_buffer[-1:] == b'\x55':
                     self.rx_buffer = bytearray(b'\x55')
                 else:
@@ -254,12 +302,9 @@ class WitMotionNode(Node):
 
                 return
 
-            # Remove bytes before header
             if header_index > 0:
-
                 del self.rx_buffer[:header_index]
 
-            # Wait until complete frame
             if len(self.rx_buffer) < self.FRAME_LENGTH:
                 return
 
@@ -267,7 +312,6 @@ class WitMotionNode(Node):
                 self.rx_buffer[:self.FRAME_LENGTH]
             )
 
-            # Consume frame
             del self.rx_buffer[:self.FRAME_LENGTH]
 
             if frame[:2] != self.FRAME_HEADER:
@@ -283,15 +327,14 @@ class WitMotionNode(Node):
 
         try:
 
-            # 2-byte header + 18-byte sensor data
             values = struct.unpack(
                 '<9h',
                 frame[2:20]
             )
 
-            # ---------------------------------------------
+            # -------------------------------------------------
             # ACCELEROMETER
-            # ---------------------------------------------
+            # -------------------------------------------------
 
             ax_raw = values[0]
             ay_raw = values[1]
@@ -309,9 +352,9 @@ class WitMotionNode(Node):
                 az_raw / 32768.0
             ) * self.ACCEL_SCALE * self.GRAVITY
 
-            # ---------------------------------------------
-            # GYROSCOPE
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # GYROSCOPE RAW CONVERSION
+            # -------------------------------------------------
 
             gx_raw = values[3]
             gy_raw = values[4]
@@ -329,13 +372,15 @@ class WitMotionNode(Node):
                 gz_raw / 32768.0
             ) * self.GYRO_SCALE
 
-            gx = math.radians(gx_deg)
-            gy = math.radians(gy_deg)
-            gz = math.radians(gz_deg)
+            gyro_deg = [
+                gx_deg,
+                gy_deg,
+                gz_deg
+            ]
 
-            # ---------------------------------------------
-            # EULER ANGLES
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # EULER
+            # -------------------------------------------------
 
             roll = (
                 values[6] / 32768.0
@@ -349,9 +394,40 @@ class WitMotionNode(Node):
                 values[8] / 32768.0
             ) * self.EULER_SCALE
 
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # STARTUP CALIBRATION
+            # -------------------------------------------------
+
+            if not self.calibration_completed:
+
+                self.process_calibration(
+                    ax, ay, az,
+                    gx_deg, gy_deg, gz_deg
+                )
+
+                self.publish_calibration_status()
+
+                return
+
+            # -------------------------------------------------
+            # APPLY GYRO BIAS
+            # -------------------------------------------------
+
+            gx = math.radians(
+                gx_deg - self.gyro_bias[0]
+            )
+
+            gy = math.radians(
+                gy_deg - self.gyro_bias[1]
+            )
+
+            gz = math.radians(
+                gz_deg - self.gyro_bias[2]
+            )
+
+            # -------------------------------------------------
             # TIMESTAMP
-            # ---------------------------------------------
+            # -------------------------------------------------
 
             timestamp = datetime.now(
                 timezone.utc
@@ -359,9 +435,9 @@ class WitMotionNode(Node):
                 timespec='milliseconds'
             )
 
-            # ---------------------------------------------
-            # PUBLISH
-            # ---------------------------------------------
+            # -------------------------------------------------
+            # PUBLISH ROS
+            # -------------------------------------------------
 
             self.publish_imu(
                 ax, ay, az,
@@ -373,12 +449,20 @@ class WitMotionNode(Node):
                 roll, pitch, yaw
             )
 
+            # -------------------------------------------------
+            # PUBLISH JSON
+            # -------------------------------------------------
+
             self.publish_json(
                 timestamp,
                 ax, ay, az,
                 gx, gy, gz,
                 roll, pitch, yaw
             )
+
+            # -------------------------------------------------
+            # CSV
+            # -------------------------------------------------
 
             self.write_csv(
                 timestamp,
@@ -389,19 +473,289 @@ class WitMotionNode(Node):
 
             self.frame_count += 1
 
-            if self.frame_count % 100 == 0:
-
-                self.get_logger().info(
-                    f'Frames received: {self.frame_count}'
-                )
-
-        except (struct.error, ValueError) as error:
+        except (struct.error, ValueError, OverflowError) as error:
 
             self.error_count += 1
 
             self.get_logger().warning(
                 f'Frame parsing error: {error}'
             )
+
+    # =========================================================
+    # CALIBRATION STABILITY CHECK
+    # =========================================================
+
+    def is_sensor_still(
+        self,
+        ax, ay, az,
+        gx_deg, gy_deg, gz_deg
+    ):
+
+        # Gyroscope movement threshold
+        gyro_stable = (
+            abs(gx_deg) <= self.gyro_motion_threshold
+            and abs(gy_deg) <= self.gyro_motion_threshold
+            and abs(gz_deg) <= self.gyro_motion_threshold
+        )
+
+        # Accelerometer magnitude should remain near gravity
+        accel_magnitude = math.sqrt(
+            ax * ax +
+            ay * ay +
+            az * az
+        )
+
+        accel_stable = (
+            abs(accel_magnitude - self.GRAVITY)
+            <= self.accel_tolerance
+        )
+
+        return gyro_stable and accel_stable
+
+    # =========================================================
+    # CALIBRATION RESET
+    # =========================================================
+
+    def reset_calibration_window(self):
+
+        self.calibration_start_time = None
+
+        self.gyro_sum = [0.0, 0.0, 0.0]
+        self.gyro_sample_count = 0
+
+        self.calibration_progress = 0.0
+
+    # =========================================================
+    # AUTO CALIBRATION
+    # =========================================================
+
+    def process_calibration(
+        self,
+        ax, ay, az,
+        gx_deg, gy_deg, gz_deg
+    ):
+
+        if self.calibration_state == 'waiting_for_sensor':
+
+            self.calibration_state = 'calibrating'
+
+            self.get_logger().info(
+                'Sensor detected. Starting auto-calibration.'
+            )
+
+        # Check whether the sensor is stationary
+        if not self.is_sensor_still(
+            ax, ay, az,
+            gx_deg, gy_deg, gz_deg
+        ):
+
+            if self.calibration_start_time is not None:
+
+                self.get_logger().warning(
+                    'Movement detected. Restarting calibration timer.'
+                )
+
+            self.reset_calibration_window()
+
+            self.calibration_state = 'calibrating'
+
+            return
+
+        # Start stable calibration window
+        if self.calibration_start_time is None:
+
+            self.calibration_start_time = time.monotonic()
+
+            self.gyro_sum = [0.0, 0.0, 0.0]
+            self.gyro_sample_count = 0
+
+            self.get_logger().info(
+                'Sensor stable. Calibration timer started.'
+            )
+
+        # Accumulate gyro samples in degrees/second
+        self.gyro_sum[0] += gx_deg
+        self.gyro_sum[1] += gy_deg
+        self.gyro_sum[2] += gz_deg
+
+        self.gyro_sample_count += 1
+
+        elapsed = (
+            time.monotonic() -
+            self.calibration_start_time
+        )
+
+        self.calibration_progress = min(
+            100.0,
+            (elapsed / self.calibration_duration) * 100.0
+        )
+
+        # Wait for complete calibration duration
+        if elapsed < self.calibration_duration:
+            return
+
+        # Require enough samples before accepting calibration
+        if self.gyro_sample_count < 100:
+
+            self.get_logger().warning(
+                'Not enough calibration samples. Restarting.'
+            )
+
+            self.reset_calibration_window()
+            return
+
+        # Calculate average gyro bias
+        self.gyro_bias = [
+            value / self.gyro_sample_count
+            for value in self.gyro_sum
+        ]
+
+        self.calibration_completed = True
+        self.calibration_state = 'ready'
+        self.calibration_progress = 100.0
+
+        self.save_calibration()
+
+        self.get_logger().info(
+            '========================================'
+        )
+
+        self.get_logger().info(
+            'WT901 AUTO-CALIBRATION COMPLETED'
+        )
+
+        self.get_logger().info(
+            f'Gyro bias X: {self.gyro_bias[0]:.5f} deg/s'
+        )
+
+        self.get_logger().info(
+            f'Gyro bias Y: {self.gyro_bias[1]:.5f} deg/s'
+        )
+
+        self.get_logger().info(
+            f'Gyro bias Z: {self.gyro_bias[2]:.5f} deg/s'
+        )
+
+        self.get_logger().info(
+            'Telemetry is now enabled.'
+        )
+
+        self.get_logger().info(
+            '========================================'
+        )
+
+    # =========================================================
+    # SAVE CALIBRATION
+    # =========================================================
+
+    def save_calibration(self):
+
+        data = {
+            'source': 'witmotion_wt901sdcl_bt50',
+            'timestamp': datetime.now(
+                timezone.utc
+            ).isoformat(timespec='seconds'),
+            'calibration_type': 'startup_gyro_bias',
+            'duration_seconds': self.calibration_duration,
+            'sample_count': self.gyro_sample_count,
+            'gyro_bias_deg_s': {
+                'x': self.gyro_bias[0],
+                'y': self.gyro_bias[1],
+                'z': self.gyro_bias[2]
+            }
+        }
+
+        temp_path = self.calibration_path + '.tmp'
+
+        try:
+
+            with open(temp_path, 'w') as file:
+
+                json.dump(
+                    data,
+                    file,
+                    indent=4
+                )
+
+                file.flush()
+                os.fsync(file.fileno())
+
+            os.replace(
+                temp_path,
+                self.calibration_path
+            )
+
+            self.get_logger().info(
+                f'Calibration saved: {self.calibration_path}'
+            )
+
+        except OSError as error:
+
+            self.get_logger().error(
+                f'Cannot save calibration: {error}'
+            )
+
+    # =========================================================
+    # CALIBRATION STATUS JSON
+    # =========================================================
+
+    def publish_calibration_status(self):
+
+        now = time.monotonic()
+
+        # Publish progress once per second
+        if now - self.last_status_publish < 1.0:
+            return
+
+        self.last_status_publish = now
+
+        if self.calibration_completed:
+            return
+
+        elapsed = 0.0
+
+        if self.calibration_start_time is not None:
+
+            elapsed = (
+                now - self.calibration_start_time
+            )
+
+        remaining = max(
+            0.0,
+            self.calibration_duration - elapsed
+        )
+
+        payload = {
+            'source': 'witmotion_wt901sdcl_bt50',
+            'timestamp': datetime.now(
+                timezone.utc
+            ).astimezone().isoformat(
+                timespec='milliseconds'
+            ),
+            'status': 'calibrating',
+            'calibration': {
+                'completed': False,
+                'progress': round(
+                    self.calibration_progress,
+                    1
+                ),
+                'duration_seconds': self.calibration_duration,
+                'elapsed_seconds': round(elapsed, 1),
+                'remaining_seconds': round(remaining, 1),
+                'sample_count': self.gyro_sample_count,
+                'gyro': 'sampling',
+                'instruction': 'Keep mannequin stationary'
+            }
+        }
+
+        msg = String()
+
+        msg.data = json.dumps(
+            payload,
+            separators=(',', ':')
+        )
+
+        self.json_pub.publish(msg)
 
     # =========================================================
     # EULER TO QUATERNION
@@ -499,7 +853,6 @@ class WitMotionNode(Node):
 
         msg = Vector3()
 
-        # Degrees, preserving previous convention
         msg.x = float(roll)
         msg.y = float(pitch)
         msg.z = float(yaw)
@@ -507,7 +860,7 @@ class WitMotionNode(Node):
         self.euler_pub.publish(msg)
 
     # =========================================================
-    # JSON PUBLISHER
+    # JSON TELEMETRY
     # =========================================================
 
     def publish_json(
@@ -521,8 +874,12 @@ class WitMotionNode(Node):
         payload = {
             'source': 'witmotion_wt901sdcl_bt50',
             'timestamp': timestamp,
-            'status': 'ok',
+            'status': 'ready',
             'field_count': 9,
+            'calibration': {
+                'completed': True,
+                'type': 'startup_gyro_bias'
+            },
             'data': {
                 'accel': {
                     'x': round(ax, 5),
@@ -586,12 +943,15 @@ class WitMotionNode(Node):
     def destroy_node(self):
 
         self.get_logger().info(
-            'Stopping WitMotion node...'
+            'Stopping WT901 node...'
         )
 
-        if hasattr(self, 'csv_file') and not self.csv_file.closed:
-            self.csv_file.flush()
-            self.csv_file.close()
+        if hasattr(self, 'csv_file'):
+
+            if not self.csv_file.closed:
+
+                self.csv_file.flush()
+                self.csv_file.close()
 
         if self.serial_port is not None:
 
@@ -614,6 +974,7 @@ def main(args=None):
     node = WitMotionNode()
 
     try:
+
         rclpy.spin(node)
 
     except KeyboardInterrupt:
