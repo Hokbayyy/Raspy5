@@ -44,17 +44,18 @@ MAX_QUEUE_SIZE = 3
 
 
 # ============================================================
-# FIELD ORDER - TOTAL 108 FIELD
+# FIELD ORDER - TOTAL 109 FIELD (DISAMAKAN DENGAN WEB)
 # URUTAN INI TIDAK BOLEH DIUBAH TANPA MENYESUAIKAN RECEIVER
 # ============================================================
 
 EXPECTED_KEYS = [
 
     # --------------------------------------------------------
-    # 1. ARDUINO UNO Q (23)
+    # 1. ARDUINO UNO Q (24) -> Web readingId 1001..1024 (M1) / 2001..2024 (M2)
     # --------------------------------------------------------
 
     "lidar_raw",
+    "lidar_median",
 
     "mq_nh3",
     "mq_co",
@@ -224,6 +225,7 @@ EXPECTED_KEYS = [
 ARDUINO_MAP = {
 
     "lidar_distance_cm": "lidar_raw",
+    "lidar_median_cm": "lidar_median",
 
     "mq135_nh3_ppm": "mq_nh3",
     "mq135_co_ppm": "mq_co",
@@ -278,6 +280,86 @@ AURORA_MAP = {
     "sound_db_left": "sound_dbLeft",
     "sound_db_right": "sound_dbRight",
 }
+
+
+# ============================================================
+# URUTAN LOADCELL DARI HX711_NODE (/sensors/loadcell)
+# hx711_node mengirim {"loadcell": [[raw, gram, gram_kalman, newton, newton_kalman], ...]}
+# dengan urutan: [0]=leher, [1]=paha_kanan, [2]=paha_kiri, [3]=kaki_kanan, [4]=kaki_kiri
+# ============================================================
+
+LOADCELL_INDEX_KEYS = [
+    "loadcell_leher",
+    "loadcell_paka",
+    "loadcell_paki",
+    "loadcell_kaka",
+    "loadcell_kaki",
+]
+
+
+# ============================================================
+# WEB COMPACT V2 READING ID MAPPING (Be-smart-manekin)
+# Mannequin 1: 1001..1095 | Mannequin 2: otomatis +1000 (2001..2095)
+# ============================================================
+
+WEB_READING_ID_MAP_M1 = {
+    # 1. Arduino Uno Q (1001..1024)
+    "lidar_raw": 1001,
+    "lidar_median": 1002,
+    "mq_nh3": 1003,
+    "mq_co": 1004,
+    "mq_co2": 1005,
+    "smoke": 1006,
+    "mpu_acc_x_raw": 1007,
+    "mpu_acc_y_raw": 1008,
+    "mpu_acc_z_raw": 1009,
+    "mpu_gyro_x_raw": 1010,
+    "mpu_gyro_y_raw": 1011,
+    "mpu_gyro_z_raw": 1012,
+    "mpu_acc_x_kalman": 1013,
+    "mpu_acc_y_kalman": 1014,
+    "mpu_acc_z_kalman": 1015,
+    "mpu_gyro_x_kalman": 1016,
+    "mpu_gyro_y_kalman": 1017,
+    "mpu_gyro_z_kalman": 1018,
+    "adxl_acc_x_raw": 1019,
+    "adxl_acc_y_raw": 1020,
+    "adxl_acc_z_raw": 1021,
+    "adxl_acc_x_kalman": 1022,
+    "adxl_acc_y_kalman": 1023,
+    "adxl_acc_z_kalman": 1024,
+
+    # 2. Cosmic Aurora - LSM6DS3, BME280, SEN0232 (1025..1036)
+    "accelx": 1025,
+    "accely": 1026,
+    "accelz": 1027,
+    "gyrox": 1028,
+    "gyroy": 1029,
+    "gyroz": 1030,
+    "bme_temp": 1031,
+    "bme_hum": 1032,
+    "bme_pres": 1033,
+    "bme_alt": 1034,
+    "sound_dbLeft": 1035,
+    "sound_dbRight": 1036,
+
+    # 3. SmartSkin Piezo 1..14 (1037..1050)
+    **{f"piezo{i}": 1036 + i for i in range(1, 15)},
+
+    # 4. SmartSkin FSR 1..14 (1051..1064)
+    **{f"fsr{i}": 1050 + i for i in range(1, 15)},
+
+    # 5. SmartSkin MCP9808 1..14 (1065..1078)
+    **{f"mcp{i}": 1064 + i for i in range(1, 15)},
+
+    # 6. SmartSkin Flex 1..16 (1079..1094)
+    **{f"flex{i}": 1078 + i for i in range(1, 17)},
+
+    # 7. Thermal (1095)
+    "thermal": 1095,
+}
+
+GRAVITY_MS2 = 9.80665
 
 
 # ============================================================
@@ -337,6 +419,15 @@ class LoRaTransmitterNode(Node):
 
         super().__init__("lora_transmitter_node")
 
+        self.declare_parameter("mannequin_id", 1)
+        self.declare_parameter("boot_count", 1)
+        self.declare_parameter("payload_mode", "array")
+
+        self.mannequin_id = int(self.get_parameter("mannequin_id").value)
+        self.boot_count = int(self.get_parameter("boot_count").value)
+        self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
+        self.packet_sequence = 0
+
         self.lock = threading.RLock()
 
         # Data terbaru yang sudah diterima
@@ -360,6 +451,13 @@ class LoRaTransmitterNode(Node):
         # Alert queue has priority over regular telemetry packets.
         self.alert_sequence = 0
         self.alert_tx_queue = deque(maxlen=10)
+
+        # Publisher JSON Compact v2 siap kirim langsung ke Web (Be-smart-manekin)
+        self.web_v2_pub = self.create_publisher(
+            String,
+            "/telemetri/web/v2",
+            10
+        )
 
         # ====================================================
         # ROS SUBSCRIBERS
@@ -837,29 +935,71 @@ class LoRaTransmitterNode(Node):
 
         payload = self.parse_json(msg.data)
 
-        if isinstance(payload, dict):
+        if not isinstance(payload, dict):
+            return
 
-            data = payload.get("data", payload)
+        # 1. Format terbaru dari hx711_node.py:
+        #    {"loadcell": [[raw, gram, gram_kalman, newton, newton_kalman], ...]}
+        #    Urutan LOADCELLS di hx711_node.py:
+        #    [0]=leher, [1]=paha_kanan, [2]=paha_kiri, [3]=kaki_kanan, [4]=kaki_kiri
+        loadcell_list = payload.get("loadcell")
 
-            if not isinstance(data, dict):
-                return
+        if isinstance(loadcell_list, list):
+            updated = 0
 
-            mapping = {
+            for idx, target_key in enumerate(LOADCELL_INDEX_KEYS):
+                if idx >= len(loadcell_list):
+                    break
 
-                "loadcell_paka": "loadcell_paka",
-                "loadcell_paki": "loadcell_paki",
-                "loadcell_leher": "loadcell_leher",
-                "loadcell_kaka": "loadcell_kaka",
-                "loadcell_kaki": "loadcell_kaki",
-            }
+                entry = loadcell_list[idx]
 
-            updated = self.update_mapped_values(
-                data,
-                mapping
-            )
+                if isinstance(entry, list):
+                    # Prioritaskan gram_kalman (index 2), fallback ke gram (index 1) atau raw (index 0)
+                    if len(entry) >= 3:
+                        val = entry[2]
+                    elif len(entry) >= 2:
+                        val = entry[1]
+                    elif len(entry) >= 1:
+                        val = entry[0]
+                    else:
+                        continue
+                else:
+                    val = entry
+
+                if self.update_field(target_key, val):
+                    updated += 1
 
             if updated:
                 self.received_sources.add("loadcell")
+            return
+
+        # 2. Format dictionary (fallback):
+        data = payload.get("data", payload)
+
+        if not isinstance(data, dict):
+            return
+
+        mapping = {
+            "loadcell_paka": "loadcell_paka",
+            "loadcell_paki": "loadcell_paki",
+            "loadcell_leher": "loadcell_leher",
+            "loadcell_kaka": "loadcell_kaka",
+            "loadcell_kaki": "loadcell_kaki",
+            "leher": "loadcell_leher",
+            "paha_kanan": "loadcell_paka",
+            "paha_kiri": "loadcell_paki",
+            "kaki_kanan": "loadcell_kaka",
+            "kaki_kaki": "loadcell_kaki",
+            "kaki_kiri": "loadcell_kaki",
+        }
+
+        updated = self.update_mapped_values(
+            data,
+            mapping
+        )
+
+        if updated:
+            self.received_sources.add("loadcell")
 
     # ========================================================
     # WITMOTION JSON CALLBACK (/sensors/witmotion)
@@ -892,28 +1032,43 @@ class LoRaTransmitterNode(Node):
 
         candidates = {}
 
+        # Web Backend menggunakan satuan:
+        # - Akselerasi: g (-16 .. 16 g). Jika witmotion_node mengirim m/s2, bagi 9.80665.
+        # - Gyroscope : deg/s (-2000 .. 2000 °/s). Jika witmotion_node mengirim rad/s, konversi degrees().
+        # - Euler     : degree (-180 .. 180 °).
         if isinstance(accel, dict):
-            candidates["ax"] = accel.get("x")
-            candidates["ay"] = accel.get("y")
-            candidates["az"] = accel.get("z")
+            accel_unit = str(accel.get("unit", "m/s2")).lower()
+            for axis, key in (("x", "ax"), ("y", "ay"), ("z", "az")):
+                raw_val = valid_number(accel.get(axis))
+                if raw_val is not None:
+                    if "m/s" in accel_unit:
+                        candidates[key] = round(raw_val / GRAVITY_MS2, 4)
+                    else:
+                        candidates[key] = round(raw_val, 4)
         else:
             candidates["ax"] = data.get("accel_x", data.get("ax"))
             candidates["ay"] = data.get("accel_y", data.get("ay"))
             candidates["az"] = data.get("accel_z", data.get("az"))
 
         if isinstance(gyro, dict):
-            candidates["gx"] = gyro.get("x")
-            candidates["gy"] = gyro.get("y")
-            candidates["gz"] = gyro.get("z")
+            gyro_unit = str(gyro.get("unit", "rad/s")).lower()
+            for axis, key in (("x", "gx"), ("y", "gy"), ("z", "gz")):
+                raw_val = valid_number(gyro.get(axis))
+                if raw_val is not None:
+                    if "rad" in gyro_unit:
+                        candidates[key] = round(math.degrees(raw_val), 4)
+                    else:
+                        candidates[key] = round(raw_val, 4)
         else:
             candidates["gx"] = data.get("gyro_x", data.get("gx"))
             candidates["gy"] = data.get("gyro_y", data.get("gy"))
             candidates["gz"] = data.get("gyro_z", data.get("gz"))
 
         if isinstance(euler, dict):
-            candidates["roll"] = euler.get("roll")
-            candidates["pitch"] = euler.get("pitch")
-            candidates["yaw"] = euler.get("yaw")
+            for axis in ("roll", "pitch", "yaw"):
+                raw_val = valid_number(euler.get(axis))
+                if raw_val is not None:
+                    candidates[axis] = round(raw_val, 3)
         else:
             candidates["roll"] = data.get("roll")
             candidates["pitch"] = data.get("pitch")
@@ -1042,6 +1197,44 @@ class LoRaTransmitterNode(Node):
         )
 
     # ========================================================
+    # BUILD WEB COMPACT V2 PACKET (Be-smart-manekin)
+    # {"v":2,"b":...,"s":...,"t":...,"r":[[readingId,value],...]}
+    # ========================================================
+
+    def build_web_v2_packet(self):
+
+        id_offset = 1000 if self.mannequin_id == 2 else 0
+        readings = []
+
+        with self.lock:
+
+            for key, base_id in WEB_READING_ID_MAP_M1.items():
+
+                value = self.latest_values.get(key)
+
+                if value is None and HOLD_LAST_VALUE:
+                    value = self.last_values.get(key)
+
+                readings.append([base_id + id_offset, value])
+
+            self.packet_sequence = (self.packet_sequence + 1) & 0x7FFFFFFF
+            seq = self.packet_sequence
+
+        payload = {
+            "v": 2,
+            "b": self.boot_count,
+            "s": seq,
+            "t": int(time.time() * 1000),
+            "r": readings,
+        }
+
+        return json.dumps(
+            payload,
+            separators=(",", ":"),
+            allow_nan=False
+        )
+
+    # ========================================================
     # BUILD ONE LORA FRAGMENT
     # ========================================================
 
@@ -1074,9 +1267,6 @@ class LoRaTransmitterNode(Node):
 
     def transmit_callback(self):
 
-        if self.serial_port is None:
-            return
-
         # Jangan kirim paket kosong sebelum menerima data sensor.
         with self.lock:
 
@@ -1085,7 +1275,19 @@ class LoRaTransmitterNode(Node):
 
         try:
 
-            payload = self.build_packet()
+            # Publish format Compact v2 Web ke topic ROS /telemetri/web/v2
+            web_v2_json = self.build_web_v2_packet()
+            web_msg = String()
+            web_msg.data = web_v2_json
+            self.web_v2_pub.publish(web_msg)
+
+            if self.serial_port is None:
+                return
+
+            if self.payload_mode == "web_v2":
+                payload = web_v2_json
+            else:
+                payload = self.build_packet()
 
             fragment = self.fragment_packet(payload)
 
