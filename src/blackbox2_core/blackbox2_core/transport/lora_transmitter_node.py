@@ -31,9 +31,11 @@ TX_POWER = 20
 # Kirim satu paket setiap 1 detik
 TRANSMIT_INTERVAL = 1.0
 
-# Batas pemeriksaan ukuran paket di sisi gateway.
-# Pastikan juga sesuai batas payload dan konfigurasi RAK.
-MAX_PAYLOAD = 700
+# Batas konservatif ukuran DATA yang dikirim ke RAK per transmisi.
+# Uji manual menunjukkan 240 byte berhasil dan 255 byte ditolak.
+# Sisakan ruang untuk header fragment dan CRC.
+MAX_FRAGMENT_BYTES = 200
+FRAGMENT_DATA_BYTES = 175
 
 # Pertahankan nilai terakhir yang valid.
 # Tidak pernah membuat nilai dummy.
@@ -436,7 +438,10 @@ class LoRaTransmitterNode(Node):
         # Data valid terakhir
         self.last_values = {}
 
+        # Queue berisi paket telemetry (setiap paket adalah list fragmen).
         self.tx_queue = deque()
+        self.active_telemetry_fragments = deque()
+        self.fragment_sequence = 0
 
         self.serial_port = None
         self.tx_active = False
@@ -1157,10 +1162,12 @@ class LoRaTransmitterNode(Node):
             if len(compact) != 12:
                 raise ValueError(f"Invalid compact alert length: {len(compact)}")
 
-            fragment = self.fragment_packet(compact)
+            alert_fragments = self.fragment_packet(compact)
             if len(self.alert_tx_queue) == self.alert_tx_queue.maxlen:
                 self.get_logger().warning("Alert TX queue full; oldest alert will be discarded")
-            self.alert_tx_queue.append(fragment)
+            # Alert compact saat ini hanya satu fragmen; tetap gunakan antrean prioritas.
+            for alert_fragment in alert_fragments:
+                self.alert_tx_queue.append(alert_fragment)
             self.get_logger().info(
                 f"Alert queued: {compact} ({len(compact)} payload bytes)"
             )
@@ -1239,27 +1246,53 @@ class LoRaTransmitterNode(Node):
     # ========================================================
 
     def fragment_packet(self, payload):
+        """Split one payload into RAK-safe fragments.
 
-        json_bytes = payload.encode("utf-8")
+        Wire format per fragment:
+            FRG:<packet_id_hex>:<index>/<total>:<chunk>
 
-        crc = crc16_ccitt(json_bytes)
+        The final fragment additionally carries *<CRC16> for the complete
+        original payload. The receiver must concatenate chunks in index order
+        and validate CRC after reassembly.
+        """
+        payload_bytes = payload.encode("utf-8")
+        crc = crc16_ccitt(payload_bytes)
 
-        complete_data = (
-            json_bytes +
-            f"*{crc:04X}".encode("ascii")
+        if not payload_bytes:
+            raise ValueError("Payload kosong tidak dapat difragmentasi")
+
+        self.fragment_sequence = (self.fragment_sequence + 1) & 0xFFFF
+        packet_id = self.fragment_sequence
+
+        chunks = [
+            payload_bytes[i:i + FRAGMENT_DATA_BYTES]
+            for i in range(0, len(payload_bytes), FRAGMENT_DATA_BYTES)
+        ]
+        total = len(chunks)
+        fragments = []
+
+        for index, chunk in enumerate(chunks, start=1):
+            header = f"FRG:{packet_id:04X}:{index}/{total}:".encode("ascii")
+            body = chunk
+
+            # CRC payload utuh hanya ditambahkan pada fragmen terakhir.
+            if index == total:
+                body += f"*{crc:04X}".encode("ascii")
+
+            fragment = header + body
+            if len(fragment) > MAX_FRAGMENT_BYTES:
+                raise ValueError(
+                    f"Fragmen {index}/{total} terlalu besar: "
+                    f"{len(fragment)} byte (maks {MAX_FRAGMENT_BYTES})"
+                )
+            fragments.append(fragment)
+
+        self.get_logger().info(
+            f"Packet fragmented: id={packet_id:04X} | "
+            f"payload={len(payload_bytes)} bytes | fragments={total} | "
+            f"max_fragment={max(map(len, fragments))} bytes"
         )
-
-        header = b"FRG:1/1:"
-
-        fragment = header + complete_data
-
-        if len(fragment) > MAX_PAYLOAD:
-
-            raise ValueError(
-                f"Payload terlalu besar: {len(fragment)} bytes"
-            )
-
-        return fragment
+        return fragments
 
     # ========================================================
     # TRANSMIT TIMER
@@ -1289,7 +1322,7 @@ class LoRaTransmitterNode(Node):
             else:
                 payload = self.build_packet()
 
-            fragment = self.fragment_packet(payload)
+            fragments = self.fragment_packet(payload)
 
             with self.lock:
 
@@ -1298,10 +1331,12 @@ class LoRaTransmitterNode(Node):
                     self.tx_queue.popleft()
 
                     self.get_logger().warning(
-                        "Oldest packet removed from TX queue"
+                        "Oldest telemetry packet removed from TX queue"
                     )
 
-                self.tx_queue.append(fragment)
+                # Simpan satu paket sebagai satu unit agar batas antrean
+                # MAX_QUEUE_SIZE menghitung paket, bukan jumlah fragmen.
+                self.tx_queue.append(fragments)
 
         except Exception as error:
 
@@ -1323,13 +1358,18 @@ class LoRaTransmitterNode(Node):
         if self.tx_active:
             return
 
-        # Alert packets take priority; telemetry queue remains unchanged.
+        # Alert packets take priority over telemetry fragments.
         if self.alert_tx_queue:
             fragment = self.alert_tx_queue.popleft()
-        elif self.tx_queue:
-            fragment = self.tx_queue.popleft()
         else:
-            return
+            if not self.active_telemetry_fragments and self.tx_queue:
+                packet_fragments = self.tx_queue.popleft()
+                self.active_telemetry_fragments.extend(packet_fragments)
+
+            if self.active_telemetry_fragments:
+                fragment = self.active_telemetry_fragments.popleft()
+            else:
+                return
 
         self.tx_active = True
 
@@ -1338,6 +1378,11 @@ class LoRaTransmitterNode(Node):
             hex_data = fragment.hex().upper()
 
             command = f"AT+PSEND={hex_data}"
+
+            self.get_logger().info(
+                f"TX SIZE: {len(fragment)} bytes | "
+                f"AT command: {len(command)} chars"
+            )
 
             self.serial_port.reset_input_buffer()
 
