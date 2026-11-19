@@ -46,6 +46,9 @@ setup(
             'analog_sensor_node = blackbox2_core.sensors.analog_mux.analog_sensor_node:main',
             'hx711_node = blackbox2_core.sensors.gpio.hx711_node:main',
             'witmotion_node = blackbox2_core.sensors.imu.witmotion_node:main',
+            'device_monitor = blackbox2_core.core.device_monitor_node:main',
+            'readiness_manager = blackbox2_core.core.readiness_manager_node:main',
+            'alert_manager = blackbox2_core.core.alert_manager_node:main',
         ],
     },
 )

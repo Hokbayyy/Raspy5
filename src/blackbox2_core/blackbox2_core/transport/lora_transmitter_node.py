@@ -352,6 +352,10 @@ class LoRaTransmitterNode(Node):
 
         self.received_sources = set()
 
+        # Alert queue has priority over regular telemetry packets.
+        self.alert_sequence = 0
+        self.alert_tx_queue = deque(maxlen=10)
+
         # ====================================================
         # ROS SUBSCRIBERS
         # ====================================================
@@ -401,6 +405,14 @@ class LoRaTransmitterNode(Node):
             Imu,
             "witmotion_imu",
             self.witmotion_imu_callback,
+            10
+        )
+
+        # Compact system alerts from Alert Manager
+        self.alert_sub = self.create_subscription(
+            String,
+            "/system/alerts",
+            self.alert_callback,
             10
         )
 
@@ -882,6 +894,91 @@ class LoRaTransmitterNode(Node):
             )
 
     # ========================================================
+    # COMPACT ALERT ENCODER
+    # ========================================================
+
+    def alert_callback(self, msg):
+        """Encode a JSON alert as a compact 12-byte ASCII payload.
+
+        Layout: A1 + sequence(4 hex) + severity(1 hex) +
+                event(2 hex) + status(1 hex) + offline-mask(2 hex).
+        CRC16 and FRG header are added by fragment_packet().
+        """
+        try:
+            alert = json.loads(msg.data)
+            if not isinstance(alert, dict):
+                raise ValueError("Alert JSON must be an object")
+
+            severity_map = {"INFO": 0, "WARNING": 1, "ERROR": 2, "CRITICAL": 3}
+            event_map = {
+                "SYSTEM_STATUS_CHANGED": 0x01,
+                "DEVICE_OFFLINE": 0x02,
+                "DEVICE_RECOVERED": 0x03,
+                "DEVICE_CALIBRATING": 0x04,
+            }
+            status_map = {
+                "INITIALIZING": 0,
+                "OPERATIONAL": 1,
+                "DEGRADED": 2,
+                "CALIBRATING": 3,
+            }
+            device_bits = {
+                "arduino_uno_q": 0,
+                "cosmic_aurora": 1,
+                "analog_sensors": 2,
+                "mcp9808": 3,
+                "hx711_loadcells": 4,
+                "witmotion_wt901": 5,
+            }
+
+            severity_name = str(alert.get("severity", "INFO")).upper()
+            event_name = str(alert.get("code", "UNKNOWN")).upper()
+            details = alert.get("details") or {}
+            if not isinstance(details, dict):
+                details = {}
+            system = details.get("system_status") or {}
+            if not isinstance(system, dict):
+                system = {}
+
+            status_name = system.get("status") or details.get("current_status") or "INITIALIZING"
+            severity = severity_map.get(severity_name, 0)
+            event_code = event_map.get(event_name, 0x7F)
+            status = status_map.get(str(status_name).upper(), 0)
+
+            offline_devices = system.get("offline_devices", [])
+            if not isinstance(offline_devices, list):
+                offline_devices = []
+            # Device-specific events may identify one device directly.
+            device_name = details.get("device") or details.get("device_name")
+            if device_name:
+                offline_devices = list(offline_devices) + [device_name]
+
+            device_mask = 0
+            for device in offline_devices:
+                bit = device_bits.get(str(device))
+                if bit is not None:
+                    device_mask |= (1 << bit)
+
+            self.alert_sequence = (self.alert_sequence + 1) & 0xFFFF
+            compact = (
+                f"A1{self.alert_sequence:04X}{severity:X}"
+                f"{event_code:02X}{status:X}{device_mask:02X}"
+            )
+            if len(compact) != 12:
+                raise ValueError(f"Invalid compact alert length: {len(compact)}")
+
+            fragment = self.fragment_packet(compact)
+            if len(self.alert_tx_queue) == self.alert_tx_queue.maxlen:
+                self.get_logger().warning("Alert TX queue full; oldest alert will be discarded")
+            self.alert_tx_queue.append(fragment)
+            self.get_logger().info(
+                f"Alert queued: {compact} ({len(compact)} payload bytes)"
+            )
+
+        except Exception as error:
+            self.get_logger().error(f"Alert encoding failed: {error}")
+
+    # ========================================================
     # BUILD FIXED JSON ARRAY
     # ========================================================
 
@@ -989,12 +1086,15 @@ class LoRaTransmitterNode(Node):
         if self.tx_active:
             return
 
-        if not self.tx_queue:
+        # Alert packets take priority; telemetry queue remains unchanged.
+        if self.alert_tx_queue:
+            fragment = self.alert_tx_queue.popleft()
+        elif self.tx_queue:
+            fragment = self.tx_queue.popleft()
+        else:
             return
 
         self.tx_active = True
-
-        fragment = self.tx_queue.popleft()
 
         try:
 

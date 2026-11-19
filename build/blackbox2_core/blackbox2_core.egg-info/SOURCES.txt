@@ -10,6 +10,9 @@ blackbox2_core.egg-info/requires.txt
 blackbox2_core.egg-info/top_level.txt
 blackbox2_core.egg-info/zip-safe
 blackbox2_core/core/__init__.py
+blackbox2_core/core/alert_manager_node.py
+blackbox2_core/core/device_monitor_node.py
+blackbox2_core/core/readiness_manager_node.py
 blackbox2_core/drivers/__init__.py
 blackbox2_core/drivers/arduino_uno_q_node.py
 blackbox2_core/drivers/cosmic_aurora_node.py
