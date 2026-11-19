@@ -1,94 +1,75 @@
 
+#!/usr/bin/env python3
+
+import os
+import csv
+import json
+import math
+import struct
+import serial
+
+from datetime import datetime, timezone
+
 import rclpy
 from rclpy.node import Node
 
 from sensor_msgs.msg import Imu
 from geometry_msgs.msg import Vector3
-
-import serial
-import struct
-import math
+from std_msgs.msg import String
 
 
-class WitMotionModbusNode(Node):
+class WitMotionNode(Node):
+
+    FRAME_HEADER = b'\x55\x61'
+    FRAME_LENGTH = 28
+
+    ACCEL_SCALE = 16.0
+    GYRO_SCALE = 2000.0
+    EULER_SCALE = 180.0
+
+    GRAVITY = 9.80665
 
     def __init__(self):
         super().__init__('witmotion_hwt901b_node')
 
-        # ==========================================================
-        # 1. PARAMETERS
-        # ==========================================================
+        # =====================================================
+        # PARAMETERS
+        # =====================================================
+
         self.declare_parameter('port', '/dev/ttyACM0')
         self.declare_parameter('baudrate', 115200)
         self.declare_parameter('polling_rate', 20.0)
         self.declare_parameter('serial_timeout', 0.01)
 
-        self.port = self.get_parameter('port').value
-        self.baudrate = self.get_parameter('baudrate').value
-        self.polling_rate = self.get_parameter('polling_rate').value
-        self.serial_timeout = self.get_parameter('serial_timeout').value
+        self.port = self.get_parameter(
+            'port'
+        ).value
 
-        # ==========================================================
-        # 2. MODBUS CONFIGURATION
-        # ==========================================================
-        self.slave_address = 0x50
-        self.function_code = 0x03
-        self.start_register = 0x0034
-        self.register_count = 12
+        self.baudrate = self.get_parameter(
+            'baudrate'
+        ).value
 
-        self.expected_byte_count = self.register_count * 2
-        self.expected_frame_length = 5 + self.expected_byte_count
+        self.polling_rate = self.get_parameter(
+            'polling_rate'
+        ).value
 
-        self.modbus_cmd = bytearray([
-            self.slave_address,
-            self.function_code,
-            (self.start_register >> 8) & 0xFF,
-            self.start_register & 0xFF,
-            (self.register_count >> 8) & 0xFF,
-            self.register_count & 0xFF
-        ])
+        self.serial_timeout = self.get_parameter(
+            'serial_timeout'
+        ).value
 
-        self.modbus_cmd += self.calculate_crc(self.modbus_cmd)
+        # =====================================================
+        # SERIAL
+        # =====================================================
 
-        # Buffer untuk menerima frame serial
+        self.serial_port = None
         self.rx_buffer = bytearray()
 
-        self.serial_connected = False
-        self.request_count = 0
-        self.valid_frame_count = 0
-        self.invalid_frame_count = 0
+        self.connect_serial()
 
-        # ==========================================================
-        # 3. SERIAL CONNECTION
-        # ==========================================================
-        self.ser = None
+        # =====================================================
+        # ROS PUBLISHERS
+        # =====================================================
 
-        try:
-            self.ser = serial.Serial(
-                port=self.port,
-                baudrate=self.baudrate,
-                timeout=self.serial_timeout
-            )
-
-            self.ser.dtr = True
-            self.ser.rts = True
-
-            self.serial_connected = True
-
-            self.get_logger().info(
-                f"WitMotion terhubung: {self.port} "
-                f"({self.baudrate} baud)"
-            )
-
-        except serial.SerialException as e:
-            self.get_logger().error(
-                f"Gagal membuka serial {self.port}: {e}"
-            )
-            raise SystemExit
-
-        # ==========================================================
-        # 4. ROS PUBLISHERS
-        # ==========================================================
         self.imu_pub = self.create_publisher(
             Imu,
             'witmotion_imu',
@@ -101,168 +82,337 @@ class WitMotionModbusNode(Node):
             10
         )
 
-        # ==========================================================
-        # 5. TIMER
-        # ==========================================================
-        if self.polling_rate <= 0:
-            self.get_logger().error(
-                "polling_rate harus lebih besar dari 0"
-            )
-            raise ValueError("Invalid polling_rate")
+        self.json_pub = self.create_publisher(
+            String,
+            '/sensors/witmotion',
+            10
+        )
 
-        timer_period = 1.0 / self.polling_rate
+        # =====================================================
+        # CSV LOGGER
+        # =====================================================
+
+        self.csv_dir = os.path.expanduser(
+            '~/blackbox2_ws/logs/imu'
+        )
+
+        os.makedirs(
+            self.csv_dir,
+            exist_ok=True
+        )
+
+        self.csv_path = os.path.join(
+            self.csv_dir,
+            'witmotion.csv'
+        )
+
+        self.csv_file = open(
+            self.csv_path,
+            'a',
+            newline='',
+            buffering=1
+        )
+
+        self.csv_writer = csv.writer(
+            self.csv_file
+        )
+
+        if os.path.getsize(self.csv_path) == 0:
+            self.csv_writer.writerow([
+                'timestamp',
+                'accel_x', 'accel_y', 'accel_z',
+                'gyro_x', 'gyro_y', 'gyro_z',
+                'roll', 'pitch', 'yaw'
+            ])
+
+        # =====================================================
+        # FRAME CONFIGURATION
+        # =====================================================
+
+        self.frame_id = 'imu_link'
+
+        self.frame_count = 0
+        self.error_count = 0
+
+        timer_period = 1.0 / max(
+            float(self.polling_rate), 1.0
+        )
 
         self.timer = self.create_timer(
             timer_period,
-            self.polling_callback
+            self.read_serial
         )
 
         self.get_logger().info(
-            f"Polling WitMotion: {self.polling_rate:.1f} Hz"
+            'WT901SDCL-BT50 node started'
         )
 
-    # ==============================================================
-    # MODBUS CRC16
-    # ==============================================================
-    @staticmethod
-    def calculate_crc(data):
-        crc = 0xFFFF
+        self.get_logger().info(
+            f'Serial: {self.port} @ {self.baudrate}'
+        )
 
-        for byte in data:
-            crc ^= byte
+        self.get_logger().info(
+            f'CSV: {self.csv_path}'
+        )
 
-            for _ in range(8):
-                if crc & 0x0001:
-                    crc >>= 1
-                    crc ^= 0xA001
-                else:
-                    crc >>= 1
+        self.get_logger().info(
+            'JSON topic: /sensors/witmotion'
+        )
 
-        return crc.to_bytes(2, byteorder='little')
+    # =========================================================
+    # SERIAL CONNECTION
+    # =========================================================
 
-    # ==============================================================
-    # CRC VALIDATION
-    # ==============================================================
-    def validate_crc(self, frame):
-        if len(frame) < 3:
-            return False
+    def connect_serial(self):
 
-        calculated_crc = self.calculate_crc(frame[:-2])
-        received_crc = frame[-2:]
+        try:
+            self.serial_port = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                timeout=self.serial_timeout,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE
+            )
 
-        return calculated_crc == received_crc
+            self.serial_port.reset_input_buffer()
 
-    # ==============================================================
-    # SERIAL POLLING
-    # ==============================================================
-    def polling_callback(self):
+            self.get_logger().info(
+                f'Connected to {self.port}'
+            )
 
-        if self.ser is None or not self.ser.is_open:
+        except serial.SerialException as error:
+
+            self.serial_port = None
+
+            self.get_logger().error(
+                f'Serial connection failed: {error}'
+            )
+
+    # =========================================================
+    # SERIAL READER
+    # =========================================================
+
+    def read_serial(self):
+
+        if self.serial_port is None:
             return
 
         try:
-            # ------------------------------------------------------
-            # Kirim request Modbus
-            # ------------------------------------------------------
-            self.ser.write(self.modbus_cmd)
-            self.request_count += 1
 
-            # ------------------------------------------------------
-            # Baca data serial yang tersedia
-            # ------------------------------------------------------
-            available = self.ser.in_waiting
+            waiting = self.serial_port.in_waiting
 
-            if available > 0:
-                incoming = self.ser.read(available)
+            if waiting > 0:
+
+                incoming = self.serial_port.read(
+                    waiting
+                )
+
                 self.rx_buffer.extend(incoming)
 
-            # ------------------------------------------------------
-            # Proses buffer
-            # ------------------------------------------------------
-            self.process_rx_buffer()
+                # Prevent unlimited buffer growth
+                if len(self.rx_buffer) > 4096:
+                    self.rx_buffer = self.rx_buffer[-128:]
 
-        except serial.SerialException as e:
+                self.process_rx_buffer()
+
+        except serial.SerialException as error:
+
+            self.error_count += 1
+
             self.get_logger().error(
-                f"Serial error WitMotion: {e}"
+                f'Serial read error: {error}'
             )
 
-        except Exception as e:
-            self.get_logger().error(
-                f"Error polling WitMotion: {e}"
-            )
+            try:
+                self.serial_port.close()
+            except Exception:
+                pass
 
-    # ==============================================================
-    # FRAME BUFFER PROCESSOR
-    # ==============================================================
+            self.serial_port = None
+
+    # =========================================================
+    # FRAME PARSER
+    # =========================================================
+
     def process_rx_buffer(self):
 
-        while len(self.rx_buffer) >= 5:
+        while True:
 
-            # ------------------------------------------------------
-            # Sinkronisasi slave address
-            # ------------------------------------------------------
-            if self.rx_buffer[0] != self.slave_address:
-                del self.rx_buffer[0]
-                continue
+            header_index = self.rx_buffer.find(
+                self.FRAME_HEADER
+            )
 
-            # ------------------------------------------------------
-            # Validasi function code
-            # ------------------------------------------------------
-            if self.rx_buffer[1] != self.function_code:
+            # Header not found
+            if header_index < 0:
 
-                # Modbus exception response
-                if self.rx_buffer[1] & 0x80:
-                    self.get_logger().warning(
-                        f"Modbus exception: "
-                        f"{self.rx_buffer[2]:02X}"
-                    )
+                # Preserve possible first header byte
+                if self.rx_buffer[-1:] == b'\x55':
+                    self.rx_buffer = bytearray(b'\x55')
+                else:
+                    self.rx_buffer.clear()
 
-                del self.rx_buffer[0]
-                continue
-
-            # ------------------------------------------------------
-            # Byte count
-            # ------------------------------------------------------
-            byte_count = self.rx_buffer[2]
-
-            if byte_count != self.expected_byte_count:
-                del self.rx_buffer[0]
-                continue
-
-            frame_length = 3 + byte_count + 2
-
-            # Tunggu sampai frame lengkap
-            if len(self.rx_buffer) < frame_length:
                 return
 
-            frame = bytes(self.rx_buffer[:frame_length])
+            # Remove bytes before header
+            if header_index > 0:
 
-            # Hapus frame dari buffer
-            del self.rx_buffer[:frame_length]
+                del self.rx_buffer[:header_index]
 
-            # ------------------------------------------------------
-            # CRC validation
-            # ------------------------------------------------------
-            if not self.validate_crc(frame):
-                self.invalid_frame_count += 1
+            # Wait until complete frame
+            if len(self.rx_buffer) < self.FRAME_LENGTH:
+                return
 
-                self.get_logger().warning(
-                    "CRC response WitMotion tidak valid"
-                )
+            frame = bytes(
+                self.rx_buffer[:self.FRAME_LENGTH]
+            )
+
+            # Consume frame
+            del self.rx_buffer[:self.FRAME_LENGTH]
+
+            if frame[:2] != self.FRAME_HEADER:
                 continue
 
-            self.valid_frame_count += 1
+            self.parse_frame(frame)
 
-            # ------------------------------------------------------
-            # Parsing dan publish
-            # ------------------------------------------------------
-            self.parsing_and_publish(frame)
+    # =========================================================
+    # FRAME DECODER
+    # =========================================================
 
-    # ==============================================================
+    def parse_frame(self, frame):
+
+        try:
+
+            # 2-byte header + 18-byte sensor data
+            values = struct.unpack(
+                '<9h',
+                frame[2:20]
+            )
+
+            # ---------------------------------------------
+            # ACCELEROMETER
+            # ---------------------------------------------
+
+            ax_raw = values[0]
+            ay_raw = values[1]
+            az_raw = values[2]
+
+            ax = (
+                ax_raw / 32768.0
+            ) * self.ACCEL_SCALE * self.GRAVITY
+
+            ay = (
+                ay_raw / 32768.0
+            ) * self.ACCEL_SCALE * self.GRAVITY
+
+            az = (
+                az_raw / 32768.0
+            ) * self.ACCEL_SCALE * self.GRAVITY
+
+            # ---------------------------------------------
+            # GYROSCOPE
+            # ---------------------------------------------
+
+            gx_raw = values[3]
+            gy_raw = values[4]
+            gz_raw = values[5]
+
+            gx_deg = (
+                gx_raw / 32768.0
+            ) * self.GYRO_SCALE
+
+            gy_deg = (
+                gy_raw / 32768.0
+            ) * self.GYRO_SCALE
+
+            gz_deg = (
+                gz_raw / 32768.0
+            ) * self.GYRO_SCALE
+
+            gx = math.radians(gx_deg)
+            gy = math.radians(gy_deg)
+            gz = math.radians(gz_deg)
+
+            # ---------------------------------------------
+            # EULER ANGLES
+            # ---------------------------------------------
+
+            roll = (
+                values[6] / 32768.0
+            ) * self.EULER_SCALE
+
+            pitch = (
+                values[7] / 32768.0
+            ) * self.EULER_SCALE
+
+            yaw = (
+                values[8] / 32768.0
+            ) * self.EULER_SCALE
+
+            # ---------------------------------------------
+            # TIMESTAMP
+            # ---------------------------------------------
+
+            timestamp = datetime.now(
+                timezone.utc
+            ).astimezone().isoformat(
+                timespec='milliseconds'
+            )
+
+            # ---------------------------------------------
+            # PUBLISH
+            # ---------------------------------------------
+
+            self.publish_imu(
+                ax, ay, az,
+                gx, gy, gz,
+                roll, pitch, yaw
+            )
+
+            self.publish_euler(
+                roll, pitch, yaw
+            )
+
+            self.publish_json(
+                timestamp,
+                ax, ay, az,
+                gx, gy, gz,
+                roll, pitch, yaw
+            )
+
+            self.write_csv(
+                timestamp,
+                ax, ay, az,
+                gx, gy, gz,
+                roll, pitch, yaw
+            )
+
+            self.frame_count += 1
+
+            if self.frame_count % 100 == 0:
+
+                self.get_logger().info(
+                    f'Frames received: {self.frame_count}'
+                )
+
+        except (struct.error, ValueError) as error:
+
+            self.error_count += 1
+
+            self.get_logger().warning(
+                f'Frame parsing error: {error}'
+            )
+
+    # =========================================================
     # EULER TO QUATERNION
-    # ==============================================================
+    # =========================================================
+
     @staticmethod
-    def euler_to_quaternion(roll_deg, pitch_deg, yaw_deg):
+    def euler_to_quaternion(
+        roll_deg,
+        pitch_deg,
+        yaw_deg
+    ):
 
         roll = math.radians(roll_deg)
         pitch = math.radians(pitch_deg)
@@ -277,152 +427,201 @@ class WitMotionModbusNode(Node):
         cr = math.cos(roll * 0.5)
         sr = math.sin(roll * 0.5)
 
-        qw = cy * cp * cr + sy * sp * sr
-        qx = cy * cp * sr - sy * sp * cr
-        qy = sy * cp * sr + cy * sp * cr
-        qz = sy * cp * cr - cy * sp * sr
+        qw = (
+            cr * cp * cy +
+            sr * sp * sy
+        )
 
-        return qw, qx, qy, qz
+        qx = (
+            sr * cp * cy -
+            cr * sp * sy
+        )
 
-    # ==============================================================
-    # PARSING & PUBLISH
-    # ==============================================================
-    def parsing_and_publish(self, frame):
+        qy = (
+            cr * sp * cy +
+            sr * cp * sy
+        )
 
-        try:
-            # 12 signed 16-bit registers
-            registers = struct.unpack(
-                '>12h',
-                frame[3:27]
-            )
+        qz = (
+            cr * cp * sy -
+            sr * sp * cy
+        )
 
-        except struct.error:
-            self.invalid_frame_count += 1
+        return qx, qy, qz, qw
 
-            self.get_logger().warning(
-                "Payload WitMotion tidak valid"
-            )
-            return
+    # =========================================================
+    # ROS IMU PUBLISHER
+    # =========================================================
 
-        # ==========================================================
-        # ACCELEROMETER
-        # Range ±16 g
-        # ==========================================================
-        ax = registers[0] / 32768.0 * 16.0
-        ay = registers[1] / 32768.0 * 16.0
-        az = registers[2] / 32768.0 * 16.0
+    def publish_imu(
+        self,
+        ax, ay, az,
+        gx, gy, gz,
+        roll, pitch, yaw
+    ):
 
-        # ==========================================================
-        # GYROSCOPE
-        # Range ±2000 degree/s
-        # ==========================================================
-        gx = registers[3] / 32768.0 * 2000.0
-        gy = registers[4] / 32768.0 * 2000.0
-        gz = registers[5] / 32768.0 * 2000.0
+        msg = Imu()
 
-        # ==========================================================
-        # EULER ANGLE
-        # ==========================================================
-        roll = registers[9] / 32768.0 * 180.0
-        pitch = registers[10] / 32768.0 * 180.0
-        yaw = registers[11] / 32768.0 * 180.0
+        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header.frame_id = self.frame_id
 
-        # ==========================================================
-        # ROS IMU MESSAGE
-        # ==========================================================
-        imu_msg = Imu()
-
-        imu_msg.header.stamp = self.get_clock().now().to_msg()
-        imu_msg.header.frame_id = 'imu_link'
-
-        # ----------------------------------------------------------
-        # Acceleration: g -> m/s²
-        # ----------------------------------------------------------
-        imu_msg.linear_acceleration.x = ax * 9.80665
-        imu_msg.linear_acceleration.y = ay * 9.80665
-        imu_msg.linear_acceleration.z = az * 9.80665
-
-        # ----------------------------------------------------------
-        # Gyroscope: degree/s -> rad/s
-        # ----------------------------------------------------------
-        imu_msg.angular_velocity.x = math.radians(gx)
-        imu_msg.angular_velocity.y = math.radians(gy)
-        imu_msg.angular_velocity.z = math.radians(gz)
-
-        # ----------------------------------------------------------
-        # Orientation: Euler -> Quaternion
-        # ----------------------------------------------------------
-        qw, qx, qy, qz = self.euler_to_quaternion(
+        qx, qy, qz, qw = self.euler_to_quaternion(
             roll,
             pitch,
             yaw
         )
 
-        imu_msg.orientation.w = qw
-        imu_msg.orientation.x = qx
-        imu_msg.orientation.y = qy
-        imu_msg.orientation.z = qz
+        msg.orientation.x = qx
+        msg.orientation.y = qy
+        msg.orientation.z = qz
+        msg.orientation.w = qw
 
-        # Covariance belum dikalibrasi
-        # Jangan mengarang covariance sensor.
-        # ----------------------------------------------------------
+        msg.angular_velocity.x = gx
+        msg.angular_velocity.y = gy
+        msg.angular_velocity.z = gz
 
-        self.imu_pub.publish(imu_msg)
+        msg.linear_acceleration.x = ax
+        msg.linear_acceleration.y = ay
+        msg.linear_acceleration.z = az
 
-        # ==========================================================
-        # EULER MESSAGE
-        # ==========================================================
-        euler_msg = Vector3()
+        self.imu_pub.publish(msg)
 
-        euler_msg.x = roll
-        euler_msg.y = pitch
-        euler_msg.z = yaw
+    # =========================================================
+    # ROS EULER PUBLISHER
+    # =========================================================
 
-        self.euler_pub.publish(euler_msg)
+    def publish_euler(
+        self,
+        roll,
+        pitch,
+        yaw
+    ):
 
-    # ==============================================================
-    # NODE CLEANUP
-    # ==============================================================
+        msg = Vector3()
+
+        # Degrees, preserving previous convention
+        msg.x = float(roll)
+        msg.y = float(pitch)
+        msg.z = float(yaw)
+
+        self.euler_pub.publish(msg)
+
+    # =========================================================
+    # JSON PUBLISHER
+    # =========================================================
+
+    def publish_json(
+        self,
+        timestamp,
+        ax, ay, az,
+        gx, gy, gz,
+        roll, pitch, yaw
+    ):
+
+        payload = {
+            'source': 'witmotion_wt901sdcl_bt50',
+            'timestamp': timestamp,
+            'status': 'ok',
+            'field_count': 9,
+            'data': {
+                'accel': {
+                    'x': round(ax, 5),
+                    'y': round(ay, 5),
+                    'z': round(az, 5),
+                    'unit': 'm/s2'
+                },
+                'gyro': {
+                    'x': round(gx, 5),
+                    'y': round(gy, 5),
+                    'z': round(gz, 5),
+                    'unit': 'rad/s'
+                },
+                'euler': {
+                    'roll': round(roll, 3),
+                    'pitch': round(pitch, 3),
+                    'yaw': round(yaw, 3),
+                    'unit': 'degree'
+                }
+            }
+        }
+
+        msg = String()
+
+        msg.data = json.dumps(
+            payload,
+            separators=(',', ':')
+        )
+
+        self.json_pub.publish(msg)
+
+    # =========================================================
+    # CSV LOGGER
+    # =========================================================
+
+    def write_csv(
+        self,
+        timestamp,
+        ax, ay, az,
+        gx, gy, gz,
+        roll, pitch, yaw
+    ):
+
+        self.csv_writer.writerow([
+            timestamp,
+            round(ax, 5),
+            round(ay, 5),
+            round(az, 5),
+            round(gx, 5),
+            round(gy, 5),
+            round(gz, 5),
+            round(roll, 3),
+            round(pitch, 3),
+            round(yaw, 3)
+        ])
+
+    # =========================================================
+    # CLEANUP
+    # =========================================================
+
     def destroy_node(self):
 
-        try:
-            if self.ser is not None and self.ser.is_open:
-                self.ser.close()
+        self.get_logger().info(
+            'Stopping WitMotion node...'
+        )
 
-                self.get_logger().info(
-                    "Serial WitMotion ditutup"
-                )
+        if hasattr(self, 'csv_file') and not self.csv_file.closed:
+            self.csv_file.flush()
+            self.csv_file.close()
 
-        except Exception as e:
-            self.get_logger().warning(
-                f"Error saat menutup serial: {e}"
-            )
+        if self.serial_port is not None:
+
+            try:
+                self.serial_port.close()
+            except Exception:
+                pass
 
         super().destroy_node()
 
 
-# ==================================================================
+# =============================================================
 # MAIN
-# ==================================================================
+# =============================================================
+
 def main(args=None):
 
     rclpy.init(args=args)
 
-    node = None
+    node = WitMotionNode()
 
     try:
-        node = WitMotionModbusNode()
         rclpy.spin(node)
 
     except KeyboardInterrupt:
-        if node is not None:
-            node.get_logger().info(
-                "Menghentikan WitMotion node..."
-            )
+        pass
 
     finally:
-        if node is not None:
-            node.destroy_node()
+
+        node.destroy_node()
 
         if rclpy.ok():
             rclpy.shutdown()

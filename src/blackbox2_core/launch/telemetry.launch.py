@@ -20,15 +20,21 @@ def generate_launch_description():
             package='blackbox2_core',
             executable='cosmic_aurora',
             name='cosmic_aurora_node',
-            output='screen'
+            output='screen',
         ),
 
-        # RAK LoRa Transmitter
+        # WitMotion WT901SDCL-BT50 IMU
         Node(
             package='blackbox2_core',
-            executable='lora_transmitter',
-            name='lora_transmitter_node',
+            executable='witmotion_node',
+            name='witmotion_hwt901b_node',
             output='screen',
+            parameters=[{
+                'port': '/dev/ttyACM0',
+                'baudrate': 115200,
+                'polling_rate': 20.0,
+                'serial_timeout': 0.1,
+            }],
         ),
 
         # MCP9808 - 14 Temperature Sensors
@@ -46,11 +52,20 @@ def generate_launch_description():
             name='analog_sensor_node',
             output='screen',
         ),
-        
+
+        # HX711 Load Cell
         Node(
             package='blackbox2_core',
             executable='hx711_node',
             name='hx711_node',
+            output='screen',
+        ),
+
+        # RAK LoRa Transmitter
+        Node(
+            package='blackbox2_core',
+            executable='lora_transmitter',
+            name='lora_transmitter_node',
             output='screen',
         ),
 
