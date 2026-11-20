@@ -20,11 +20,13 @@ Fitur:
       2. lora_rx_telemetry.csv     : Timestamp, RSSI, SNR, ukuran byte + seluruh 109 kolom nilai sensor.
       3. lora_rx_alerts.csv        : Timestamp, RSSI, SNR + detail alert kompak 12-byte yang diterima.
   - LANGSUNG MENGIRIM KE WEB BACKEND (Be-smart-manekin) pada background thread non-blocking:
-      1. Jalur Utama MQTT Compact V2:
+      1. Jalur Utama HTTP/HTTPS REST Ingest (`http.client` Keep-Alive):
+         Default: https://dev-mannequin-api.stas-rg.com (env `WEB_HTTP_URL` / param `http_base_url`).
+         POST ke `/sensor-reading/batch` & `/sensor/*` dengan header `x-ingest-key`
+         (env `WEB_INGEST_KEY` / `INGEST_API_KEY` atau param ROS2 `ingest_api_key`).
+      2. Jalur Opsional MQTT Compact V2:
          Publish ke topic `smart-mannequin/{device_id}/telemetry` (QoS 1, retain=False)
-         & subscribe ACK `smart-mannequin/{device_id}/ack`.
-      2. Jalur Opsional HTTP REST Ingest (`urllib.request`):
-         POST ke `/sensor-reading/batch` & `/sensor/*` dengan header `x-ingest-key`.
+         & subscribe ACK `smart-mannequin/{device_id}/ack` (env `WEB_MQTT_ENABLED=true` / `WEB_MQTT_HOST`).
   - Mempublikasikan ke topic ROS2:
       /telemetri/web/v2, /system/alerts, /telemetri/received_raw, /telemetri/radio_status,
       serta /telemetri/{arduino,aurora,loadcell,flex,mcp,fsr,piezo,thermal,witmotion}.
@@ -34,6 +36,7 @@ from collections import deque
 import csv
 from dataclasses import dataclass
 from datetime import datetime
+import http.client
 import json
 import math
 import os
@@ -43,8 +46,7 @@ import sys
 import threading
 import time
 from typing import Dict, List, Optional, Tuple
-import urllib.error
-import urllib.request
+from urllib.parse import urlsplit
 import zlib
 
 import serial
@@ -85,7 +87,13 @@ DEFAULT_LOG_DIR = os.path.expanduser("~/blackbox2_ws/logs/communication")
 # KONFIGURASI DEFAULT PENGIRIMAN KE WEB (Be-smart-manekin)
 # ============================================================
 
-DEFAULT_MQTT_ENABLED = True
+DEFAULT_API_BASE_URL = "https://dev-mannequin-api.stas-rg.com"
+
+DEFAULT_MQTT_ENABLED = (
+    os.environ.get("WEB_MQTT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
+    if "WEB_MQTT_ENABLED" in os.environ
+    else bool(os.environ.get("WEB_MQTT_HOST", "").strip())
+)
 DEFAULT_MQTT_HOST = os.environ.get("WEB_MQTT_HOST", "127.0.0.1")
 DEFAULT_MQTT_PORT = int(os.environ.get("WEB_MQTT_PORT", "1883"))
 DEFAULT_MQTT_USERNAME = os.environ.get("WEB_MQTT_USER", "")
@@ -94,9 +102,15 @@ DEFAULT_MQTT_PASSWORD = os.environ.get("WEB_MQTT_PASS", "")
 DEFAULT_DEVICE_ID_M1 = "AD8121DAD12451E2"
 DEFAULT_DEVICE_ID_M2 = "AD8121DAD12451E1"
 
-DEFAULT_HTTP_ENABLED = bool(os.environ.get("WEB_HTTP_URL", ""))
-DEFAULT_HTTP_BASE_URL = os.environ.get("WEB_HTTP_URL", "http://127.0.0.1:4013")
-DEFAULT_INGEST_API_KEY = os.environ.get("WEB_INGEST_KEY", "")
+DEFAULT_HTTP_ENABLED = (
+    os.environ.get("WEB_HTTP_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+)
+DEFAULT_HTTP_BASE_URL = (
+    os.environ.get("WEB_HTTP_URL", "").strip() or DEFAULT_API_BASE_URL
+).rstrip("/")
+DEFAULT_INGEST_API_KEY = (
+    os.environ.get("WEB_INGEST_KEY", "") or os.environ.get("INGEST_API_KEY", "")
+).strip()
 
 
 # ============================================================
@@ -765,6 +779,17 @@ class WebTelemetryForwarder:
         self._paho_client = None
         self._paho_connected = False
         self._simple_mqtt: Optional[SimpleSocketMqttClient] = None
+        self._http_conn: Optional[http.client.HTTPConnection] = None
+        self._http_auth_warn_at: float = 0.0
+        self._http_err_warn_at: float = 0.0
+
+        raw_http_url = (self.config.http_base_url or DEFAULT_API_BASE_URL).strip()
+        parsed_url = urlsplit(
+            raw_http_url if "://" in raw_http_url else f"https://{raw_http_url}"
+        )
+        self._http_scheme = (parsed_url.scheme or "https").lower()
+        self._http_netloc = parsed_url.netloc or urlsplit(DEFAULT_API_BASE_URL).netloc
+        self._http_base_path = parsed_url.path.rstrip("/")
 
         if self.config.mqtt_enabled:
             self._init_mqtt()
@@ -961,33 +986,92 @@ class WebTelemetryForwarder:
                 return False
         return False
 
-    def _post_http_json(self, path: str, body_obj: object) -> bool:
-        base = self.config.http_base_url.rstrip("/")
-        url = f"{base}{path}" if path.startswith("/") else f"{base}/{path}"
+    def _get_http_connection(self) -> http.client.HTTPConnection:
+        if self._http_conn is None:
+            timeout = self.config.http_timeout_sec
+            if self._http_scheme == "https":
+                self._http_conn = http.client.HTTPSConnection(
+                    self._http_netloc, timeout=timeout
+                )
+            else:
+                self._http_conn = http.client.HTTPConnection(
+                    self._http_netloc, timeout=timeout
+                )
+        return self._http_conn
+
+    def _close_http_connection(self) -> None:
+        if self._http_conn is not None:
+            try:
+                self._http_conn.close()
+            except Exception:
+                pass
+            self._http_conn = None
+
+    def _post_http_json(self, path: str, body_obj: object) -> Tuple[bool, bool]:
+        """Mengirim JSON via HTTP/HTTPS Keep-Alive. Mengembalikan (sukses, auth_blocked)."""
+        rel_path = path if path.startswith("/") else f"/{path}"
+        full_path = f"{self._http_base_path}{rel_path}" or "/"
+        url = f"{self._http_scheme}://{self._http_netloc}{full_path}"
         data = json.dumps(body_obj, separators=(",", ":"), allow_nan=False).encode("utf-8")
 
         headers = {
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "Connection": "keep-alive",
         }
         if self.config.ingest_api_key:
             headers["x-ingest-key"] = self.config.ingest_api_key
 
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-        try:
-            with urllib.request.urlopen(req, timeout=self.config.http_timeout_sec) as resp:
-                return 200 <= resp.status < 300
-        except urllib.error.HTTPError as exc:
-            self.logger.warning(f"HTTP POST {url} ditolak ({exc.code})")
-            return False
-        except Exception as exc:
-            self.logger.warning(f"HTTP POST {url} gagal: {exc}")
-            return False
+        last_exc: Optional[Exception] = None
+        for attempt in range(2):
+            conn = self._get_http_connection()
+            try:
+                conn.request("POST", full_path, body=data, headers=headers)
+                resp = conn.getresponse()
+                resp_body = resp.read()
+                status = resp.status
+                if 200 <= status < 300:
+                    return True, False
+
+                snippet = resp_body.decode("utf-8", errors="ignore")[:180].strip()
+                now = time.monotonic()
+                if status in (401, 403, 503):
+                    if now - self._http_auth_warn_at >= 30.0:
+                        self._http_auth_warn_at = now
+                        self.logger.warning(
+                            f"HTTP POST {url} ditolak ({status}: {snippet or 'Unauthorized'}). "
+                            "Pastikan INGEST_API_KEY cocok: set parameter ROS2 "
+                            "ingest_api_key:=<key> atau env WEB_INGEST_KEY=<key>."
+                        )
+                    return False, True
+
+                if now - self._http_err_warn_at >= 15.0:
+                    self._http_err_warn_at = now
+                    self.logger.warning(
+                        f"HTTP POST {url} ditolak ({status}: {snippet})"
+                    )
+                return False, False
+            except (http.client.HTTPException, OSError) as exc:
+                last_exc = exc
+                self._close_http_connection()
+                if attempt == 0:
+                    continue
+                break
+            except Exception as exc:
+                last_exc = exc
+                self._close_http_connection()
+                break
+
+        now = time.monotonic()
+        if now - self._http_err_warn_at >= 15.0:
+            self._http_err_warn_at = now
+            self.logger.warning(f"HTTP POST {url} gagal: {last_exc}")
+        return False, False
 
     def _send_http_telemetry(
         self, mannequin_id: int, d: Dict[str, Optional[float]]
     ) -> None:
-        ok_any = False
+        endpoints: List[Tuple[str, object]] = []
 
         readings: List[Dict[str, object]] = []
         for idx, (loc, pt) in enumerate(SMARTSKIN_14_LOCATIONS, start=1):
@@ -1040,22 +1124,21 @@ class WebTelemetryForwarder:
             })
 
         if readings:
-            if self._post_http_json(
+            endpoints.append((
                 "/sensor-reading/batch",
                 {"mannequinId": mannequin_id, "readings": readings},
-            ):
-                ok_any = True
+            ))
 
         if d.get("lidar_raw") is not None or d.get("lidar_median") is not None:
-            lidar_body = {"sensor_id": 901}
+            lidar_body: Dict[str, object] = {"sensor_id": 901}
             if d.get("lidar_raw") is not None:
                 lidar_body["value"] = d["lidar_raw"]
             if d.get("lidar_median") is not None:
                 lidar_body["kalmanvalue"] = d["lidar_median"]
-            ok_any = self._post_http_json("/sensor/lidar", lidar_body) or ok_any
+            endpoints.append(("/sensor/lidar", lidar_body))
 
         if any(d.get(k) is not None for k in ("mq_co", "mq_co2", "smoke", "mq_nh3")):
-            mq_body = {"sensor_id": 101}
+            mq_body: Dict[str, object] = {"sensor_id": 101}
             if d.get("mq_nh3") is not None:
                 mq_body["value"] = d["mq_nh3"]
             if d.get("mq_co") is not None:
@@ -1064,7 +1147,7 @@ class WebTelemetryForwarder:
                 mq_body["co2"] = d["mq_co2"]
             if d.get("smoke") is not None:
                 mq_body["smoke"] = d["smoke"]
-            ok_any = self._post_http_json("/sensor/mq", mq_body) or ok_any
+            endpoints.append(("/sensor/mq", mq_body))
 
         if any(
             d.get(k) is not None
@@ -1088,7 +1171,7 @@ class WebTelemetryForwarder:
             ):
                 if d.get(src_k) is not None:
                     adxl_body[dst_k] = d[src_k]
-            ok_any = self._post_http_json("/sensor/adxl", adxl_body) or ok_any
+            endpoints.append(("/sensor/adxl", adxl_body))
 
         if any(d.get(k) is not None for k in ("bme_temp", "bme_pres", "bme_hum")):
             bme_body: Dict[str, object] = {}
@@ -1098,16 +1181,14 @@ class WebTelemetryForwarder:
                 bme_body["pressure"] = d["bme_pres"]
             if d.get("bme_hum") is not None:
                 bme_body["humidity"] = d["bme_hum"]
-            ok_any = self._post_http_json("/sensor/bme", bme_body) or ok_any
+            endpoints.append(("/sensor/bme", bme_body))
 
         for lc_key, lc_id in LOADCELL_WEB_IDS:
             if d.get(lc_key) is not None:
-                ok_any = (
-                    self._post_http_json(
-                        "/sensor/loadcell", {"sensor_id": lc_id, "value": d[lc_key]}
-                    )
-                    or ok_any
-                )
+                endpoints.append((
+                    "/sensor/loadcell",
+                    {"sensor_id": lc_id, "value": d[lc_key]},
+                ))
 
         if any(d.get(k) is not None for k in ("roll", "pitch", "yaw")):
             wit_body: Dict[str, object] = {}
@@ -1117,32 +1198,29 @@ class WebTelemetryForwarder:
                 wit_body["y_angle"] = d["pitch"]
             if d.get("yaw") is not None:
                 wit_body["z_angle"] = d["yaw"]
-            ok_any = self._post_http_json("/sensor/witsensor", wit_body) or ok_any
+            endpoints.append(("/sensor/witsensor", wit_body))
 
         if d.get("sound_dbRight") is not None:
-            ok_any = (
-                self._post_http_json(
-                    "/sensor/ky",
-                    {
-                        "sensor_id": 601,
-                        "value": d["sound_dbRight"],
-                        "mannequin_id": mannequin_id,
-                    },
-                )
-                or ok_any
-            )
+            endpoints.append((
+                "/sensor/ky",
+                {"sensor_id": 601, "value": d["sound_dbRight"], "mannequin_id": mannequin_id},
+            ))
         if d.get("sound_dbLeft") is not None:
-            ok_any = (
-                self._post_http_json(
-                    "/sensor/ky",
-                    {
-                        "sensor_id": 602,
-                        "value": d["sound_dbLeft"],
-                        "mannequin_id": mannequin_id,
-                    },
-                )
-                or ok_any
-            )
+            endpoints.append((
+                "/sensor/ky",
+                {"sensor_id": 602, "value": d["sound_dbLeft"], "mannequin_id": mannequin_id},
+            ))
+
+        if not endpoints:
+            return
+
+        ok_any = False
+        for path, body_obj in endpoints:
+            ok, auth_blocked = self._post_http_json(path, body_obj)
+            if ok:
+                ok_any = True
+            if auth_blocked:
+                break
 
         if ok_any:
             self.http_sent_count += 1
@@ -1153,6 +1231,7 @@ class WebTelemetryForwarder:
         self._running = False
         with self._cond:
             self._cond.notify_all()
+        self._close_http_connection()
         if self._paho_client is not None:
             try:
                 self._paho_client.loop_stop()
@@ -1833,11 +1912,13 @@ class LoRaManekin1ReceiverNode(Node):
         self.create_timer(0.5, self.check_frag_timeout)
 
         active_dev_id = web_config.resolve_device_id(self.default_mannequin_id)
+        key_state = "SET" if web_config.ingest_api_key else "EMPTY"
         self.get_logger().info(
             f"LoRa Manekin Receiver started on {self.radio.active_port} "
             f"@ {self.radio_config.baudrate} | Freq:{self.radio_config.freq} SF{self.radio_config.sf} "
             f"BW{self.radio_config.bw} CR{self.radio_config.cr} | {NUM_PARAMS} params | "
             f"LocalLog:{self.comm_logger.log_dir} | "
+            f"WebHTTP:{web_config.http_enabled} ({web_config.http_base_url}, key={key_state}) | "
             f"WebMQTT:{web_config.mqtt_enabled} (topic=smart-mannequin/{active_dev_id}/telemetry)"
         )
 
@@ -2283,12 +2364,18 @@ class LoRaManekin1ReceiverNode(Node):
 
         # 6. Log 1 baris horizontal bersih
         pkt_label = "1Paket" if total_frags == 1 else f"{total_frags}Frg"
-        web_info = (
-            f"MQTT:{self.web_forwarder.mqtt_sent_count}"
-            f"(ACK:{self.web_forwarder.last_ack_status})"
-        )
+        web_parts = []
         if self.web_forwarder.config.http_enabled:
-            web_info += f" HTTP:{self.web_forwarder.http_sent_count}"
+            web_parts.append(
+                f"HTTP:{self.web_forwarder.http_sent_count}"
+                f"(fail:{self.web_forwarder.http_fail_count})"
+            )
+        if self.web_forwarder.config.mqtt_enabled or not web_parts:
+            web_parts.append(
+                f"MQTT:{self.web_forwarder.mqtt_sent_count}"
+                f"(ACK:{self.web_forwarder.last_ack_status})"
+            )
+        web_info = " ".join(web_parts)
 
         self.get_logger().info(
             f"[RX #{self.packet_count:04d}] [M{mannequin_id} {payload_mode}] "
