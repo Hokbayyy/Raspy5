@@ -20,14 +20,15 @@ Fitur:
       2. lora_rx_telemetry.csv     : Timestamp, RSSI, SNR, ukuran byte + seluruh 109 kolom nilai sensor.
       3. lora_rx_alerts.csv        : Timestamp, RSSI, SNR + detail alert kompak 12-byte yang diterima.
   - LANGSUNG MENGIRIM KE WEB BACKEND (Be-smart-manekin) pada background thread non-blocking:
-      1. Jalur Utama HTTP/HTTPS REST Ingest (`http.client` Keep-Alive):
+      1. Jalur Utama MQTTS Compact V2 (TLS terverifikasi, QoS 1, retain=false):
+         Default: mqtts://mannequin-mqtt.stas-rg.com:18883
+         (env `WEB_MQTT_URL` / `WEB_MQTT_HOST` / `WEB_MQTT_PORT` / `WEB_MQTT_USER` / `WEB_MQTT_PASS` / `WEB_MQTT_CLIENT_ID`).
+         Publish ke topic `smart-mannequin/{device_id}/telemetry`
+         & subscribe ACK `smart-mannequin/{device_id}/ack`.
+      2. Jalur Opsional HTTP/HTTPS REST Ingest (`http.client` Keep-Alive, default nonaktif):
+         Aktifkan dengan `WEB_HTTP_ENABLED=true` atau param ROS2 `http_enabled:=true`.
          Default: https://dev-mannequin-api.stas-rg.com (env `WEB_HTTP_URL` / param `http_base_url`).
-         POST ke `/sensor-reading/batch` & `/sensor/*` dengan header `x-ingest-key`
-         (env `WEB_INGEST_KEY` / `INGEST_API_KEY` atau param ROS2 `ingest_api_key`).
-      2. Jalur Opsional MQTT Compact V2:
-         Publish ke topic `smart-mannequin/{device_id}/telemetry` (QoS 1, retain=False)
-         & subscribe ACK `smart-mannequin/{device_id}/ack` (env `WEB_MQTT_ENABLED=true` / `WEB_MQTT_HOST`).
-  - Mempublikasikan ke topic ROS2:
+   - Mempublikasikan ke topic ROS2:
       /telemetri/web/v2, /system/alerts, /telemetri/received_raw, /telemetri/radio_status,
       serta /telemetri/{arduino,aurora,loadcell,flex,mcp,fsr,piezo,thermal,witmotion}.
 """
@@ -41,12 +42,13 @@ import json
 import math
 import os
 import socket
+import ssl
 import struct
 import sys
 import threading
 import time
-from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlsplit
+from typing import Callable, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlsplit
 import zlib
 
 import serial
@@ -88,22 +90,71 @@ DEFAULT_LOG_DIR = os.path.expanduser("~/blackbox2_ws/logs/communication")
 # ============================================================
 
 DEFAULT_API_BASE_URL = "https://dev-mannequin-api.stas-rg.com"
+DEFAULT_MQTT_BROKER_URL_FALLBACK = "mqtts://mannequin-mqtt.stas-rg.com:18883"
+
+
+def _parse_mqtt_broker_url(raw_url: str) -> Tuple[str, int, bool, str, str]:
+    candidate = raw_url.strip() or DEFAULT_MQTT_BROKER_URL_FALLBACK
+    if "://" not in candidate:
+        candidate = f"mqtts://{candidate}"
+    parsed = urlsplit(candidate)
+    scheme = (parsed.scheme or "mqtts").lower()
+    use_tls = scheme in ("mqtts", "ssl", "tls", "wss")
+    host = parsed.hostname or "mannequin-mqtt.stas-rg.com"
+    port = parsed.port or (18883 if use_tls else 1883)
+    username = unquote(parsed.username) if parsed.username else ""
+    password = unquote(parsed.password) if parsed.password else ""
+    return host, port, use_tls, username, password
+
+
+DEFAULT_MQTT_BROKER_URL = (
+    os.environ.get("WEB_MQTT_URL", "").strip() or DEFAULT_MQTT_BROKER_URL_FALLBACK
+)
+_MQTT_URL_HOST, _MQTT_URL_PORT, _MQTT_URL_TLS, _MQTT_URL_USER, _MQTT_URL_PASS = (
+    _parse_mqtt_broker_url(DEFAULT_MQTT_BROKER_URL)
+)
 
 DEFAULT_MQTT_ENABLED = (
-    os.environ.get("WEB_MQTT_ENABLED", "").strip().lower() in ("1", "true", "yes", "on")
-    if "WEB_MQTT_ENABLED" in os.environ
-    else bool(os.environ.get("WEB_MQTT_HOST", "").strip())
+    os.environ.get("WEB_MQTT_ENABLED", "true").strip().lower()
+    in ("1", "true", "yes", "on")
 )
-DEFAULT_MQTT_HOST = os.environ.get("WEB_MQTT_HOST", "127.0.0.1")
-DEFAULT_MQTT_PORT = int(os.environ.get("WEB_MQTT_PORT", "1883"))
-DEFAULT_MQTT_USERNAME = os.environ.get("WEB_MQTT_USER", "")
-DEFAULT_MQTT_PASSWORD = os.environ.get("WEB_MQTT_PASS", "")
+DEFAULT_MQTT_HOST = os.environ.get("WEB_MQTT_HOST", "").strip() or _MQTT_URL_HOST
+DEFAULT_MQTT_PORT = int(os.environ.get("WEB_MQTT_PORT", "").strip() or _MQTT_URL_PORT)
+if "WEB_MQTT_TLS" in os.environ:
+    DEFAULT_MQTT_TLS = os.environ.get("WEB_MQTT_TLS", "true").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+elif "WEB_MQTT_PORT" in os.environ and "WEB_MQTT_URL" not in os.environ and DEFAULT_MQTT_PORT == 1883:
+    DEFAULT_MQTT_TLS = False
+else:
+    DEFAULT_MQTT_TLS = _MQTT_URL_TLS
+
+DEFAULT_MQTT_CA_CERTS = os.environ.get("WEB_MQTT_CA_CERTS", "").strip()
+DEFAULT_MQTT_USERNAME = (
+    os.environ.get("WEB_MQTT_USER", "").strip() or _MQTT_URL_USER or "manekin_pi"
+)
+DEFAULT_MQTT_PASSWORD = (
+    os.environ.get("WEB_MQTT_PASS", "")
+    or os.environ.get("MQTT_PASSWORD", "")
+    or _MQTT_URL_PASS
+).strip()
+DEFAULT_MQTT_CLIENT_ID = (
+    os.environ.get("WEB_MQTT_CLIENT_ID", "").strip() or "manekin-rx-01"
+)
+DEFAULT_MQTT_ALERTS_ENABLED = (
+    os.environ.get("WEB_MQTT_ALERTS_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 
 DEFAULT_DEVICE_ID_M1 = "AD8121DAD12451E2"
 DEFAULT_DEVICE_ID_M2 = "AD8121DAD12451E1"
 
 DEFAULT_HTTP_ENABLED = (
-    os.environ.get("WEB_HTTP_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
+    os.environ.get("WEB_HTTP_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
 )
 DEFAULT_HTTP_BASE_URL = (
     os.environ.get("WEB_HTTP_URL", "").strip() or DEFAULT_API_BASE_URL
@@ -235,6 +286,20 @@ WEB_READING_ID_MAP_M1: Dict[str, int] = {
     **{f"mcp{i}": 1064 + i for i in range(1, 15)},
     **{f"flex{i}": 1078 + i for i in range(1, 17)},
     "thermal": 1095,
+    "loadcell_leher": 1098,
+    "loadcell_paki": 1099,
+    "loadcell_paka": 1100,
+    "loadcell_kaki": 1101,
+    "loadcell_kaka": 1102,
+    "ax": 1103,
+    "ay": 1104,
+    "az": 1105,
+    "gx": 1106,
+    "gy": 1107,
+    "gz": 1108,
+    "roll": 1109,
+    "pitch": 1110,
+    "yaw": 1111,
 }
 REVERSE_WEB_ID_MAP: Dict[int, str] = {
     rid: key for key, rid in WEB_READING_ID_MAP_M1.items()
@@ -282,6 +347,61 @@ LOADCELL_WEB_IDS: Tuple[Tuple[str, int], ...] = (
     ("loadcell_paka", 803),
     ("loadcell_kaki", 804),
     ("loadcell_kaka", 805),
+)
+
+# Pemetaan 50 parameter non-SmartSkin untuk 1 request POST /sensor-reading/batch per manekin
+# (key, sensorType, location, sensorNumber, processingType)
+MODULAR_WEB_BATCH_SPECS: Tuple[Tuple[str, str, str, int, str], ...] = (
+    ("lidar_raw", "obstacle_distance", "chest", 901, "RAW"),
+    ("lidar_median", "obstacle_distance", "chest", 901, "KALMAN_FILTERED"),
+    ("mq_nh3", "gas_nh3", "chest", 101, "CALCULATED"),
+    ("mq_co", "gas_co", "chest", 101, "CALCULATED"),
+    ("mq_co2", "gas_co2", "chest", 101, "CALCULATED"),
+    ("smoke", "gas_smoke", "chest", 101, "CALCULATED"),
+    ("mpu_acc_x_raw", "x_acceleration", "chest", 202, "RAW"),
+    ("mpu_acc_y_raw", "y_acceleration", "chest", 202, "RAW"),
+    ("mpu_acc_z_raw", "z_acceleration", "chest", 202, "RAW"),
+    ("mpu_gyro_x_raw", "angular_velocity_x", "chest", 202, "RAW"),
+    ("mpu_gyro_y_raw", "angular_velocity_y", "chest", 202, "RAW"),
+    ("mpu_gyro_z_raw", "angular_velocity_z", "chest", 202, "RAW"),
+    ("mpu_acc_x_kalman", "x_acceleration", "chest", 202, "KALMAN_FILTERED"),
+    ("mpu_acc_y_kalman", "y_acceleration", "chest", 202, "KALMAN_FILTERED"),
+    ("mpu_acc_z_kalman", "z_acceleration", "chest", 202, "KALMAN_FILTERED"),
+    ("mpu_gyro_x_kalman", "angular_velocity_x", "chest", 202, "KALMAN_FILTERED"),
+    ("mpu_gyro_y_kalman", "angular_velocity_y", "chest", 202, "KALMAN_FILTERED"),
+    ("mpu_gyro_z_kalman", "angular_velocity_z", "chest", 202, "KALMAN_FILTERED"),
+    ("adxl_acc_x_raw", "x_acceleration", "chest", 201, "RAW"),
+    ("adxl_acc_y_raw", "y_acceleration", "chest", 201, "RAW"),
+    ("adxl_acc_z_raw", "z_acceleration", "chest", 201, "RAW"),
+    ("adxl_acc_x_kalman", "x_acceleration", "chest", 201, "KALMAN_FILTERED"),
+    ("adxl_acc_y_kalman", "y_acceleration", "chest", 201, "KALMAN_FILTERED"),
+    ("adxl_acc_z_kalman", "z_acceleration", "chest", 201, "KALMAN_FILTERED"),
+    ("accelx", "x_acceleration", "chest", 203, "RAW"),
+    ("accely", "y_acceleration", "chest", 203, "RAW"),
+    ("accelz", "z_acceleration", "chest", 203, "RAW"),
+    ("gyrox", "angular_velocity_x", "chest", 203, "RAW"),
+    ("gyroy", "angular_velocity_y", "chest", 203, "RAW"),
+    ("gyroz", "angular_velocity_z", "chest", 203, "RAW"),
+    ("bme_temp", "temperature", "chest", 1001, "RAW"),
+    ("bme_hum", "relative_humidity", "chest", 1001, "RAW"),
+    ("bme_pres", "barometric_pressure", "chest", 1001, "RAW"),
+    ("bme_alt", "approximate_altitude", "chest", 1001, "CALCULATED"),
+    ("sound_dbRight", "sound_intensity", "right ear", 601, "RAW"),
+    ("sound_dbLeft", "sound_intensity", "left ear", 602, "RAW"),
+    ("loadcell_leher", "joint_load", "neck", 801, "RAW"),
+    ("loadcell_paki", "joint_load", "left thigh", 802, "RAW"),
+    ("loadcell_paka", "joint_load", "right thigh", 803, "RAW"),
+    ("loadcell_kaki", "joint_load", "left foot", 804, "RAW"),
+    ("loadcell_kaka", "joint_load", "right foot", 805, "RAW"),
+    ("ax", "x_acceleration", "chest", 1010, "RAW"),
+    ("ay", "y_acceleration", "chest", 1010, "RAW"),
+    ("az", "z_acceleration", "chest", 1010, "RAW"),
+    ("gx", "angular_velocity_x", "chest", 1010, "RAW"),
+    ("gy", "angular_velocity_y", "chest", 1010, "RAW"),
+    ("gz", "angular_velocity_z", "chest", 1010, "RAW"),
+    ("roll", "euler_angle", "chest", 1010, "RAW"),
+    ("pitch", "euler_angle", "chest", 1010, "CALCULATED"),
+    ("yaw", "euler_angle", "chest", 1010, "CALIBRATED_LINEAR"),
 )
 
 ALERT_SEVERITY_NAMES: Dict[int, str] = {
@@ -620,8 +740,26 @@ def _encode_mqtt_utf8(text: str) -> bytes:
     return struct.pack("!H", len(raw)) + raw
 
 
+def build_mqtt_ssl_context(ca_certs: str = "") -> ssl.SSLContext:
+    """Membuat SSLContext dengan verifikasi sertifikat & hostname broker aktif."""
+    cafile = ca_certs.strip() or None
+    ssl_ctx = ssl.create_default_context(cafile=cafile)
+    ssl_ctx.check_hostname = True
+    ssl_ctx.verify_mode = ssl.CERT_REQUIRED
+    return ssl_ctx
+
+
+MQTT_CONNACK_REASONS: Dict[int, str] = {
+    1: "versi protokol MQTT tidak didukung",
+    2: "client_id ditolak broker",
+    3: "server broker tidak tersedia",
+    4: "username/password MQTT salah",
+    5: "tidak diizinkan (unauthorized/ACL)",
+}
+
+
 class SimpleSocketMqttClient:
-    """Client MQTT v3.1.1 murni berbasis socket standar Python (tanpa instalasi pip)."""
+    """Client MQTT v3.1.1 murni berbasis socket/TLS standar Python (tanpa instalasi pip)."""
 
     def __init__(
         self,
@@ -629,8 +767,12 @@ class SimpleSocketMqttClient:
         port: int,
         username: str = "",
         password: str = "",
-        client_id: str = "lora_rx_manekin",
+        client_id: str = "manekin-rx-01",
         keepalive: int = 30,
+        use_tls: bool = True,
+        ca_certs: str = "",
+        subscribe_topics: Tuple[str, ...] = ("smart-mannequin/+/ack",),
+        on_message: Optional[Callable[[str, bytes], None]] = None,
     ):
         self.host = host
         self.port = port
@@ -638,6 +780,10 @@ class SimpleSocketMqttClient:
         self.password = password
         self.client_id = client_id
         self.keepalive = keepalive
+        self.use_tls = use_tls
+        self.ca_certs = ca_certs
+        self.subscribe_topics = subscribe_topics
+        self.on_message = on_message
         self._sock: Optional[socket.socket] = None
         self._pkt_id: int = 1
         self._last_io: float = 0.0
@@ -646,10 +792,92 @@ class SimpleSocketMqttClient:
     def is_connected(self) -> bool:
         return self._sock is not None
 
+    def _next_pkt_id(self) -> int:
+        self._pkt_id = (self._pkt_id % 65535) + 1
+        return self._pkt_id
+
+    @staticmethod
+    def _recv_exact(sock: socket.socket, size: int) -> bytes:
+        chunks = bytearray()
+        while len(chunks) < size:
+            chunk = sock.recv(size - len(chunks))
+            if not chunk:
+                raise ConnectionError("Koneksi MQTT ditutup oleh broker")
+            chunks.extend(chunk)
+        return bytes(chunks)
+
+    def _read_packet(
+        self, sock: socket.socket, first_byte_timeout: Optional[float] = None
+    ) -> Tuple[int, int, bytes]:
+        old_timeout = sock.gettimeout()
+        if first_byte_timeout is not None:
+            sock.settimeout(first_byte_timeout)
+        try:
+            first = sock.recv(1)
+        finally:
+            if first_byte_timeout is not None:
+                sock.settimeout(old_timeout)
+        if not first:
+            raise ConnectionError("Koneksi MQTT ditutup oleh broker")
+
+        b0 = first[0]
+        pkt_type = b0 >> 4
+        flags = b0 & 0x0F
+
+        multiplier = 1
+        rem_len = 0
+        while True:
+            b = self._recv_exact(sock, 1)[0]
+            rem_len += (b & 0x7F) * multiplier
+            if (b & 0x80) == 0:
+                break
+            multiplier *= 128
+            if multiplier > 128 * 128 * 128:
+                raise ConnectionError("MQTT Remaining Length tidak valid")
+
+        payload = self._recv_exact(sock, rem_len) if rem_len > 0 else b""
+        return pkt_type, flags, payload
+
+    def _dispatch_incoming_publish(
+        self, sock: socket.socket, flags: int, payload: bytes
+    ) -> None:
+        if len(payload) < 2:
+            return
+        topic_len = struct.unpack("!H", payload[:2])[0]
+        pos = 2 + topic_len
+        if len(payload) < pos:
+            return
+        topic = payload[2:pos].decode("utf-8", errors="ignore")
+        qos = (flags >> 1) & 0x03
+        if qos > 0:
+            if len(payload) < pos + 2:
+                return
+            pkt_id = struct.unpack("!H", payload[pos:pos + 2])[0]
+            pos += 2
+            # Kirim PUBACK untuk pesan QoS 1 dari broker
+            sock.sendall(b"\x40\x02" + struct.pack("!H", pkt_id))
+            self._last_io = time.monotonic()
+
+        if self.on_message is not None:
+            self.on_message(topic, payload[pos:])
+
     def connect(self) -> bool:
         self.close()
-        sock = socket.create_connection((self.host, self.port), timeout=3.0)
-        sock.settimeout(2.0)
+        raw_sock = socket.create_connection((self.host, self.port), timeout=5.0)
+        sock: socket.socket
+        if self.use_tls:
+            try:
+                ssl_ctx = build_mqtt_ssl_context(self.ca_certs)
+                sock = ssl_ctx.wrap_socket(raw_sock, server_hostname=self.host)
+            except Exception:
+                try:
+                    raw_sock.close()
+                except Exception:
+                    pass
+                raise
+        else:
+            sock = raw_sock
+        sock.settimeout(3.0)
 
         connect_flags = 0x02  # Clean Session
         payload = _encode_mqtt_utf8(self.client_id)
@@ -667,16 +895,33 @@ class SimpleSocketMqttClient:
         packet = b"\x10" + _encode_mqtt_remaining_length(len(body)) + body
         sock.sendall(packet)
 
-        resp = sock.recv(4)
-        if len(resp) < 4 or resp[0] != 0x20 or resp[3] != 0x00:
+        pkt_type, _flags, connack = self._read_packet(sock)
+        if pkt_type != 2 or len(connack) < 2 or connack[1] != 0:
+            rc = connack[1] if len(connack) >= 2 else -1
+            reason = MQTT_CONNACK_REASONS.get(rc, f"rc={rc}")
             sock.close()
-            raise ConnectionError(f"MQTT CONNACK ditolak: {resp!r}")
+            raise ConnectionError(f"MQTT CONNACK ditolak ({reason})")
+
+        if self.subscribe_topics:
+            sub_id = self._next_pkt_id()
+            sub_body = bytearray(struct.pack("!H", sub_id))
+            for topic in self.subscribe_topics:
+                sub_body.extend(_encode_mqtt_utf8(topic))
+                sub_body.append(1)  # QoS 1
+            sub_pkt = b"\x82" + _encode_mqtt_remaining_length(len(sub_body)) + bytes(sub_body)
+            sock.sendall(sub_pkt)
+            ack_type, _ack_flags, _ack_body = self._read_packet(sock)
+            if ack_type != 9:
+                sock.close()
+                raise ConnectionError(f"MQTT SUBACK tidak valid (pkt_type={ack_type})")
 
         self._sock = sock
         self._last_io = time.monotonic()
         return True
 
-    def publish(self, topic: str, payload_str: str, qos: int = 1) -> bool:
+    def publish(
+        self, topic: str, payload_str: str, qos: int = 1, retain: bool = False
+    ) -> bool:
         if self._sock is None:
             self.connect()
         assert self._sock is not None
@@ -684,12 +929,12 @@ class SimpleSocketMqttClient:
         topic_bytes = _encode_mqtt_utf8(topic)
         payload_bytes = payload_str.encode("utf-8")
 
+        header_byte = 0x30 | ((1 if qos == 1 else 0) << 1) | (1 if retain else 0)
         if qos == 1:
-            self._pkt_id = (self._pkt_id % 65535) + 1
-            header_byte = 0x32  # PUBLISH, QoS 1, retain=0
-            body = topic_bytes + struct.pack("!H", self._pkt_id) + payload_bytes
+            pkt_id = self._next_pkt_id()
+            body = topic_bytes + struct.pack("!H", pkt_id) + payload_bytes
         else:
-            header_byte = 0x30  # PUBLISH, QoS 0, retain=0
+            pkt_id = 0
             body = topic_bytes + payload_bytes
 
         packet = bytes([header_byte]) + _encode_mqtt_remaining_length(len(body)) + body
@@ -697,13 +942,34 @@ class SimpleSocketMqttClient:
         self._last_io = time.monotonic()
 
         if qos == 1:
-            try:
-                ack = self._sock.recv(4)
-                if not ack:
-                    raise ConnectionError("MQTT socket closed by broker")
-            except socket.timeout:
-                pass
+            deadline = time.monotonic() + 3.0
+            while time.monotonic() < deadline:
+                rem = max(0.2, deadline - time.monotonic())
+                pkt_type, flags, resp_body = self._read_packet(
+                    self._sock, first_byte_timeout=rem
+                )
+                if pkt_type == 4 and len(resp_body) >= 2:
+                    ack_id = struct.unpack("!H", resp_body[:2])[0]
+                    if ack_id == pkt_id:
+                        return True
+                elif pkt_type == 3:
+                    self._dispatch_incoming_publish(self._sock, flags, resp_body)
+            raise TimeoutError(f"MQTT PUBACK timeout ({topic})")
         return True
+
+    def poll_incoming(self, timeout: float = 0.02) -> None:
+        if self._sock is None:
+            return
+        try:
+            pkt_type, flags, body = self._read_packet(
+                self._sock, first_byte_timeout=timeout
+            )
+            if pkt_type == 3:
+                self._dispatch_incoming_publish(self._sock, flags, body)
+        except (socket.timeout, TimeoutError, BlockingIOError):
+            pass
+        except Exception:
+            self.close()
 
     def ping_if_needed(self) -> None:
         if self._sock is None:
@@ -711,8 +977,17 @@ class SimpleSocketMqttClient:
         if time.monotonic() - self._last_io >= (self.keepalive * 0.7):
             try:
                 self._sock.sendall(b"\xC0\x00")
-                self._sock.recv(2)
-                self._last_io = time.monotonic()
+                deadline = time.monotonic() + 2.5
+                while time.monotonic() < deadline:
+                    pkt_type, flags, body = self._read_packet(
+                        self._sock, first_byte_timeout=max(0.2, deadline - time.monotonic())
+                    )
+                    if pkt_type == 13:  # PINGRESP
+                        self._last_io = time.monotonic()
+                        return
+                    if pkt_type == 3:
+                        self._dispatch_incoming_publish(self._sock, flags, body)
+                raise TimeoutError("PINGRESP timeout")
             except Exception:
                 self.close()
 
@@ -730,7 +1005,7 @@ class SimpleSocketMqttClient:
 
 
 # ============================================================
-# WEB TELEMETRY FORWARDER (NON-BLOCKING MQTT V2 + HTTP REST)
+# WEB TELEMETRY FORWARDER (NON-BLOCKING MQTTS V2 + OPSIONAL HTTP)
 # ============================================================
 
 @dataclass(frozen=True)
@@ -738,15 +1013,24 @@ class WebForwarderConfig:
     """Konfigurasi pengiriman telemetry dari Receiver ke Web Backend (Be-smart-manekin)."""
 
     mqtt_enabled: bool = DEFAULT_MQTT_ENABLED
+    mqtt_broker_url: str = DEFAULT_MQTT_BROKER_URL
     mqtt_host: str = DEFAULT_MQTT_HOST
     mqtt_port: int = DEFAULT_MQTT_PORT
+    mqtt_tls: bool = DEFAULT_MQTT_TLS
+    mqtt_ca_certs: str = DEFAULT_MQTT_CA_CERTS
     mqtt_username: str = DEFAULT_MQTT_USERNAME
     mqtt_password: str = DEFAULT_MQTT_PASSWORD
+    mqtt_client_id: str = DEFAULT_MQTT_CLIENT_ID
+    mqtt_alerts_enabled: bool = DEFAULT_MQTT_ALERTS_ENABLED
     device_id: str = ""
     http_enabled: bool = DEFAULT_HTTP_ENABLED
     http_base_url: str = DEFAULT_HTTP_BASE_URL
     ingest_api_key: str = DEFAULT_INGEST_API_KEY
     http_timeout_sec: float = 2.5
+    http_legacy_endpoints: bool = False
+
+    def effective_mqtt_scheme(self) -> str:
+        return "mqtts" if self.mqtt_tls else "mqtt"
 
     def resolve_device_id(self, mannequin_id: int) -> str:
         if self.device_id.strip():
@@ -757,9 +1041,9 @@ class WebForwarderConfig:
 class WebTelemetryForwarder:
     """
     Pengirim data dari Receiver LoRa ke Web Backend (Be-smart-manekin) di background thread:
-      1. MQTT Compact V2 -> topic `smart-mannequin/{deviceIdentifier}/telemetry`
+      1. MQTTS Compact V2 -> topic `smart-mannequin/{deviceIdentifier}/telemetry` (QoS 1, retain=False)
          + subscribe Application ACK `smart-mannequin/{deviceIdentifier}/ack`
-      2. HTTP REST Ingest -> `POST /sensor-reading/batch` & `POST /sensor/*`
+      2. HTTP REST Ingest (opsional) -> `POST /sensor-reading/batch`
     """
 
     def __init__(self, config: WebForwarderConfig, logger):
@@ -778,10 +1062,13 @@ class WebTelemetryForwarder:
 
         self._paho_client = None
         self._paho_connected = False
+        self._paho_connect_event = threading.Event()
+        self._last_mqtt_error: str = ""
+        self._mqtt_err_warn_at: float = -999.0
         self._simple_mqtt: Optional[SimpleSocketMqttClient] = None
         self._http_conn: Optional[http.client.HTTPConnection] = None
-        self._http_auth_warn_at: float = 0.0
-        self._http_err_warn_at: float = 0.0
+        self._http_auth_warn_at: float = -999.0
+        self._http_err_warn_at: float = -999.0
 
         raw_http_url = (self.config.http_base_url or DEFAULT_API_BASE_URL).strip()
         parsed_url = urlsplit(
@@ -800,21 +1087,42 @@ class WebTelemetryForwarder:
         self._worker.start()
 
     def _init_mqtt(self) -> None:
-        client_id = f"lora_rx_manekin_{os.getpid()}"
+        client_id = (self.config.mqtt_client_id or "").strip() or "manekin-rx-01"
+        scheme = self.config.effective_mqtt_scheme()
+        if self.config.mqtt_username and not self.config.mqtt_password:
+            self.logger.warning(
+                f"Password MQTT untuk user '{self.config.mqtt_username}' belum diisi "
+                f"(set env WEB_MQTT_PASS / MQTT_PASSWORD atau param ROS2 mqtt_password)."
+            )
+
         if paho_mqtt is not None:
             try:
                 try:
                     client = paho_mqtt.Client(
-                        paho_mqtt.CallbackAPIVersion.VERSION2, client_id=client_id
+                        paho_mqtt.CallbackAPIVersion.VERSION2,
+                        client_id=client_id,
+                        transport="tcp",
+                        protocol=paho_mqtt.MQTTv311,
                     )
                 except AttributeError:
-                    client = paho_mqtt.Client(client_id=client_id)
+                    client = paho_mqtt.Client(
+                        client_id=client_id,
+                        transport="tcp",
+                        protocol=paho_mqtt.MQTTv311,
+                    )
+
+                if self.config.mqtt_tls:
+                    ssl_ctx = build_mqtt_ssl_context(self.config.mqtt_ca_certs)
+                    client.tls_set_context(ssl_ctx)
 
                 if self.config.mqtt_username:
                     client.username_pw_set(
                         self.config.mqtt_username,
                         self.config.mqtt_password or None,
                     )
+
+                if hasattr(client, "reconnect_delay_set"):
+                    client.reconnect_delay_set(min_delay=1, max_delay=30)
 
                 client.on_connect = self._on_paho_connect
                 client.on_disconnect = self._on_paho_disconnect
@@ -824,7 +1132,8 @@ class WebTelemetryForwarder:
                 self._paho_client = client
                 self.logger.info(
                     f"Web MQTT client (paho-mqtt) aktif -> "
-                    f"mqtt://{self.config.mqtt_host}:{self.config.mqtt_port}"
+                    f"{scheme}://{self.config.mqtt_host}:{self.config.mqtt_port} "
+                    f"(client_id={client_id}, tls={self.config.mqtt_tls}, verify=True)"
                 )
                 return
             except Exception as exc:
@@ -838,31 +1147,46 @@ class WebTelemetryForwarder:
             username=self.config.mqtt_username,
             password=self.config.mqtt_password,
             client_id=client_id,
+            use_tls=self.config.mqtt_tls,
+            ca_certs=self.config.mqtt_ca_certs,
+            on_message=self._handle_ack_message,
         )
         self.logger.info(
             f"Web MQTT client (built-in socket) siap -> "
-            f"mqtt://{self.config.mqtt_host}:{self.config.mqtt_port}"
+            f"{scheme}://{self.config.mqtt_host}:{self.config.mqtt_port} "
+            f"(client_id={client_id}, tls={self.config.mqtt_tls}, verify=True)"
         )
 
     def _on_paho_connect(self, client, userdata, flags, rc, *args) -> None:
+        is_failure = bool(getattr(rc, "is_failure", False))
         rc_val = getattr(rc, "value", rc)
-        if rc_val == 0:
+        if not is_failure and rc_val == 0:
             self._paho_connected = True
+            self._last_mqtt_error = ""
+            self._paho_connect_event.set()
             client.subscribe("smart-mannequin/+/ack", qos=1)
             self.logger.info(
-                f"Terhubung ke Web MQTT Broker ({self.config.mqtt_host}:{self.config.mqtt_port}) "
-                f"& subscribe smart-mannequin/+/ack"
+                f"Terhubung ke Web MQTT Broker "
+                f"({self.config.effective_mqtt_scheme()}://{self.config.mqtt_host}:{self.config.mqtt_port}) "
+                f"[client_id={self.config.mqtt_client_id}] & subscribe smart-mannequin/+/ack"
             )
         else:
             self._paho_connected = False
-            self.logger.warning(f"Koneksi Web MQTT gagal dengan kode: {rc}")
+            reason = (
+                MQTT_CONNACK_REASONS.get(rc_val, str(rc))
+                if isinstance(rc_val, int)
+                else str(rc)
+            )
+            self._last_mqtt_error = f"CONNACK ditolak ({reason})"
+            self._paho_connect_event.set()
+            self.logger.warning(f"Koneksi Web MQTT gagal: {self._last_mqtt_error}")
 
     def _on_paho_disconnect(self, client, userdata, *args) -> None:
         self._paho_connected = False
 
-    def _on_paho_message(self, client, userdata, msg) -> None:
+    def _handle_ack_message(self, _topic: str, payload_bytes: bytes) -> None:
         try:
-            ack = json.loads(msg.payload.decode("utf-8", errors="ignore"))
+            ack = json.loads(payload_bytes.decode("utf-8", errors="ignore"))
             if isinstance(ack, dict):
                 self.mqtt_ack_count += 1
                 status = str(ack.get("status", "UNKNOWN"))
@@ -883,6 +1207,9 @@ class WebTelemetryForwarder:
         except Exception:
             pass
 
+    def _on_paho_message(self, client, userdata, msg) -> None:
+        self._handle_ack_message(getattr(msg, "topic", ""), getattr(msg, "payload", b""))
+
     def enqueue_telemetry(
         self,
         mannequin_id: int,
@@ -896,7 +1223,7 @@ class WebTelemetryForwarder:
             self._cond.notify()
 
     def enqueue_alert(self, mannequin_id: int, alert_payload: Dict[str, object]) -> None:
-        if not self.config.mqtt_enabled and not self.config.http_enabled:
+        if not (self.config.mqtt_enabled and self.config.mqtt_alerts_enabled) and not self.config.http_enabled:
             return
         with self._cond:
             self._queue.append(("alert", mannequin_id, alert_payload, None))
@@ -913,6 +1240,7 @@ class WebTelemetryForwarder:
 
             if item is None:
                 if self._simple_mqtt is not None:
+                    self._simple_mqtt.poll_incoming()
                     self._simple_mqtt.ping_if_needed()
                 continue
 
@@ -925,7 +1253,7 @@ class WebTelemetryForwarder:
                 if self.config.http_enabled and isinstance(sensor_dict, dict):
                     self._send_http_telemetry(mannequin_id, sensor_dict)
             elif kind == "alert":
-                if self.config.mqtt_enabled:
+                if self.config.mqtt_enabled and self.config.mqtt_alerts_enabled:
                     self._send_mqtt_alert(device_id, payload_obj)
 
     def _send_mqtt_telemetry(
@@ -966,22 +1294,42 @@ class WebTelemetryForwarder:
         payload_str = json.dumps(alert_payload, separators=(",", ":"), allow_nan=False)
         self._publish_mqtt_raw(topic, payload_str)
 
+    def _log_mqtt_warning_rate_limited(self, message: str) -> None:
+        now = time.monotonic()
+        if now - self._mqtt_err_warn_at >= 15.0:
+            self._mqtt_err_warn_at = now
+            self.logger.warning(message)
+
     def _publish_mqtt_raw(self, topic: str, payload_str: str) -> bool:
         if self._paho_client is not None:
+            if not self._paho_connected and not self._paho_connect_event.is_set():
+                self._paho_connect_event.wait(timeout=2.0)
+            if not self._paho_connected:
+                detail = (
+                    self._last_mqtt_error
+                    or "belum terhubung ke broker (periksa TLS/hostname/username/password)"
+                )
+                self._log_mqtt_warning_rate_limited(
+                    f"Web MQTT publish tertunda/gagal ({topic}): {detail}"
+                )
+                return False
             try:
                 info = self._paho_client.publish(topic, payload_str, qos=1, retain=False)
                 return info.rc == 0
             except Exception as exc:
-                self.logger.warning(f"Web MQTT publish gagal ({topic}): {exc}")
+                self._log_mqtt_warning_rate_limited(
+                    f"Web MQTT publish gagal ({topic}): {exc}"
+                )
                 return False
 
         if self._simple_mqtt is not None:
             try:
-                return self._simple_mqtt.publish(topic, payload_str, qos=1)
+                return self._simple_mqtt.publish(topic, payload_str, qos=1, retain=False)
             except Exception as exc:
                 self._simple_mqtt.close()
-                self.logger.warning(
-                    f"Web MQTT socket gagal ({self.config.mqtt_host}:{self.config.mqtt_port}): {exc}"
+                self._log_mqtt_warning_rate_limited(
+                    f"Web MQTT socket gagal ({self.config.effective_mqtt_scheme()}://"
+                    f"{self.config.mqtt_host}:{self.config.mqtt_port}): {exc}"
                 )
                 return False
         return False
@@ -1123,93 +1471,105 @@ class WebTelemetryForwarder:
                 "value": d["thermal"],
             })
 
+        for key, sensor_type, location, sensor_num, proc_type in MODULAR_WEB_BATCH_SPECS:
+            val = d.get(key)
+            if val is not None:
+                readings.append({
+                    "sensorType": sensor_type,
+                    "location": location,
+                    "sensorNumber": sensor_num,
+                    "processingType": proc_type,
+                    "value": val,
+                })
+
         if readings:
             endpoints.append((
                 "/sensor-reading/batch",
                 {"mannequinId": mannequin_id, "readings": readings},
             ))
 
-        if d.get("lidar_raw") is not None or d.get("lidar_median") is not None:
-            lidar_body: Dict[str, object] = {"sensor_id": 901}
-            if d.get("lidar_raw") is not None:
-                lidar_body["value"] = d["lidar_raw"]
-            if d.get("lidar_median") is not None:
-                lidar_body["kalmanvalue"] = d["lidar_median"]
-            endpoints.append(("/sensor/lidar", lidar_body))
+        if self.config.http_legacy_endpoints:
+            if d.get("lidar_raw") is not None or d.get("lidar_median") is not None:
+                lidar_body: Dict[str, object] = {"sensor_id": 901}
+                if d.get("lidar_raw") is not None:
+                    lidar_body["value"] = d["lidar_raw"]
+                if d.get("lidar_median") is not None:
+                    lidar_body["kalmanvalue"] = d["lidar_median"]
+                endpoints.append(("/sensor/lidar", lidar_body))
 
-        if any(d.get(k) is not None for k in ("mq_co", "mq_co2", "smoke", "mq_nh3")):
-            mq_body: Dict[str, object] = {"sensor_id": 101}
-            if d.get("mq_nh3") is not None:
-                mq_body["value"] = d["mq_nh3"]
-            if d.get("mq_co") is not None:
-                mq_body["co"] = d["mq_co"]
-            if d.get("mq_co2") is not None:
-                mq_body["co2"] = d["mq_co2"]
-            if d.get("smoke") is not None:
-                mq_body["smoke"] = d["smoke"]
-            endpoints.append(("/sensor/mq", mq_body))
+            if any(d.get(k) is not None for k in ("mq_co", "mq_co2", "smoke", "mq_nh3")):
+                mq_body: Dict[str, object] = {"sensor_id": 101}
+                if d.get("mq_nh3") is not None:
+                    mq_body["value"] = d["mq_nh3"]
+                if d.get("mq_co") is not None:
+                    mq_body["co"] = d["mq_co"]
+                if d.get("mq_co2") is not None:
+                    mq_body["co2"] = d["mq_co2"]
+                if d.get("smoke") is not None:
+                    mq_body["smoke"] = d["smoke"]
+                endpoints.append(("/sensor/mq", mq_body))
 
-        if any(
-            d.get(k) is not None
-            for k in (
-                "adxl_acc_x_raw",
-                "adxl_acc_y_raw",
-                "adxl_acc_z_raw",
-                "adxl_acc_x_kalman",
-                "adxl_acc_y_kalman",
-                "adxl_acc_z_kalman",
-            )
-        ):
-            adxl_body: Dict[str, object] = {"sensor_id": 201}
-            for src_k, dst_k in (
-                ("adxl_acc_x_raw", "x"),
-                ("adxl_acc_y_raw", "y"),
-                ("adxl_acc_z_raw", "z"),
-                ("adxl_acc_x_kalman", "x_kalman"),
-                ("adxl_acc_y_kalman", "y_kalman"),
-                ("adxl_acc_z_kalman", "z_kalman"),
+            if any(
+                d.get(k) is not None
+                for k in (
+                    "adxl_acc_x_raw",
+                    "adxl_acc_y_raw",
+                    "adxl_acc_z_raw",
+                    "adxl_acc_x_kalman",
+                    "adxl_acc_y_kalman",
+                    "adxl_acc_z_kalman",
+                )
             ):
-                if d.get(src_k) is not None:
-                    adxl_body[dst_k] = d[src_k]
-            endpoints.append(("/sensor/adxl", adxl_body))
+                adxl_body: Dict[str, object] = {"sensor_id": 201}
+                for src_k, dst_k in (
+                    ("adxl_acc_x_raw", "x"),
+                    ("adxl_acc_y_raw", "y"),
+                    ("adxl_acc_z_raw", "z"),
+                    ("adxl_acc_x_kalman", "x_kalman"),
+                    ("adxl_acc_y_kalman", "y_kalman"),
+                    ("adxl_acc_z_kalman", "z_kalman"),
+                ):
+                    if d.get(src_k) is not None:
+                        adxl_body[dst_k] = d[src_k]
+                endpoints.append(("/sensor/adxl", adxl_body))
 
-        if any(d.get(k) is not None for k in ("bme_temp", "bme_pres", "bme_hum")):
-            bme_body: Dict[str, object] = {}
-            if d.get("bme_temp") is not None:
-                bme_body["temperature"] = d["bme_temp"]
-            if d.get("bme_pres") is not None:
-                bme_body["pressure"] = d["bme_pres"]
-            if d.get("bme_hum") is not None:
-                bme_body["humidity"] = d["bme_hum"]
-            endpoints.append(("/sensor/bme", bme_body))
+            if any(d.get(k) is not None for k in ("bme_temp", "bme_pres", "bme_hum")):
+                bme_body: Dict[str, object] = {}
+                if d.get("bme_temp") is not None:
+                    bme_body["temperature"] = d["bme_temp"]
+                if d.get("bme_pres") is not None:
+                    bme_body["pressure"] = d["bme_pres"]
+                if d.get("bme_hum") is not None:
+                    bme_body["humidity"] = d["bme_hum"]
+                endpoints.append(("/sensor/bme", bme_body))
 
-        for lc_key, lc_id in LOADCELL_WEB_IDS:
-            if d.get(lc_key) is not None:
+            for lc_key, lc_id in LOADCELL_WEB_IDS:
+                if d.get(lc_key) is not None:
+                    endpoints.append((
+                        "/sensor/loadcell",
+                        {"sensor_id": lc_id, "value": d[lc_key]},
+                    ))
+
+            if any(d.get(k) is not None for k in ("roll", "pitch", "yaw")):
+                wit_body: Dict[str, object] = {}
+                if d.get("roll") is not None:
+                    wit_body["x_angle"] = d["roll"]
+                if d.get("pitch") is not None:
+                    wit_body["y_angle"] = d["pitch"]
+                if d.get("yaw") is not None:
+                    wit_body["z_angle"] = d["yaw"]
+                endpoints.append(("/sensor/witsensor", wit_body))
+
+            if d.get("sound_dbRight") is not None:
                 endpoints.append((
-                    "/sensor/loadcell",
-                    {"sensor_id": lc_id, "value": d[lc_key]},
+                    "/sensor/ky",
+                    {"sensor_id": 601, "value": d["sound_dbRight"], "mannequin_id": mannequin_id},
                 ))
-
-        if any(d.get(k) is not None for k in ("roll", "pitch", "yaw")):
-            wit_body: Dict[str, object] = {}
-            if d.get("roll") is not None:
-                wit_body["x_angle"] = d["roll"]
-            if d.get("pitch") is not None:
-                wit_body["y_angle"] = d["pitch"]
-            if d.get("yaw") is not None:
-                wit_body["z_angle"] = d["yaw"]
-            endpoints.append(("/sensor/witsensor", wit_body))
-
-        if d.get("sound_dbRight") is not None:
-            endpoints.append((
-                "/sensor/ky",
-                {"sensor_id": 601, "value": d["sound_dbRight"], "mannequin_id": mannequin_id},
-            ))
-        if d.get("sound_dbLeft") is not None:
-            endpoints.append((
-                "/sensor/ky",
-                {"sensor_id": 602, "value": d["sound_dbLeft"], "mannequin_id": mannequin_id},
-            ))
+            if d.get("sound_dbLeft") is not None:
+                endpoints.append((
+                    "/sensor/ky",
+                    {"sensor_id": 602, "value": d["sound_dbLeft"], "mannequin_id": mannequin_id},
+                ))
 
         if not endpoints:
             return
@@ -1291,27 +1651,67 @@ def declare_radio_config(node: Node, default_port: str) -> RadioConfig:
 
 def declare_web_config(node: Node) -> WebForwarderConfig:
     node.declare_parameter("mqtt_enabled", DEFAULT_MQTT_ENABLED)
+    node.declare_parameter("mqtt_broker_url", DEFAULT_MQTT_BROKER_URL)
     node.declare_parameter("mqtt_host", DEFAULT_MQTT_HOST)
     node.declare_parameter("mqtt_port", DEFAULT_MQTT_PORT)
+    node.declare_parameter("mqtt_tls", DEFAULT_MQTT_TLS)
+    node.declare_parameter("mqtt_ca_certs", DEFAULT_MQTT_CA_CERTS)
     node.declare_parameter("mqtt_username", DEFAULT_MQTT_USERNAME)
     node.declare_parameter("mqtt_password", DEFAULT_MQTT_PASSWORD)
+    node.declare_parameter("mqtt_client_id", DEFAULT_MQTT_CLIENT_ID)
+    node.declare_parameter("mqtt_alerts_enabled", DEFAULT_MQTT_ALERTS_ENABLED)
     node.declare_parameter("device_id", "")
     node.declare_parameter("http_enabled", DEFAULT_HTTP_ENABLED)
     node.declare_parameter("http_base_url", DEFAULT_HTTP_BASE_URL)
     node.declare_parameter("ingest_api_key", DEFAULT_INGEST_API_KEY)
     node.declare_parameter("http_timeout_sec", 2.5)
+    node.declare_parameter("http_legacy_endpoints", False)
+
+    broker_url = str(node.get_parameter("mqtt_broker_url").value).strip() or DEFAULT_MQTT_BROKER_URL
+    mqtt_host = str(node.get_parameter("mqtt_host").value).strip()
+    mqtt_port = int(node.get_parameter("mqtt_port").value)
+    mqtt_tls = bool(node.get_parameter("mqtt_tls").value)
+    mqtt_user = str(node.get_parameter("mqtt_username").value).strip()
+    mqtt_pass = str(node.get_parameter("mqtt_password").value).strip()
+
+    if (
+        broker_url != DEFAULT_MQTT_BROKER_URL
+        and mqtt_host == DEFAULT_MQTT_HOST
+        and mqtt_port == DEFAULT_MQTT_PORT
+    ):
+        u_host, u_port, u_tls, u_user, u_pass = _parse_mqtt_broker_url(broker_url)
+        mqtt_host = u_host
+        mqtt_port = u_port
+        mqtt_tls = u_tls
+        if u_user and mqtt_user == DEFAULT_MQTT_USERNAME:
+            mqtt_user = u_user
+        if u_pass and not mqtt_pass:
+            mqtt_pass = u_pass
+    elif (
+        mqtt_port == 1883
+        and mqtt_tls == DEFAULT_MQTT_TLS
+        and "WEB_MQTT_TLS" not in os.environ
+        and broker_url == DEFAULT_MQTT_BROKER_URL
+    ):
+        mqtt_tls = False
 
     return WebForwarderConfig(
         mqtt_enabled=bool(node.get_parameter("mqtt_enabled").value),
-        mqtt_host=str(node.get_parameter("mqtt_host").value),
-        mqtt_port=int(node.get_parameter("mqtt_port").value),
-        mqtt_username=str(node.get_parameter("mqtt_username").value),
-        mqtt_password=str(node.get_parameter("mqtt_password").value),
+        mqtt_broker_url=broker_url,
+        mqtt_host=mqtt_host,
+        mqtt_port=mqtt_port,
+        mqtt_tls=mqtt_tls,
+        mqtt_ca_certs=str(node.get_parameter("mqtt_ca_certs").value).strip(),
+        mqtt_username=mqtt_user,
+        mqtt_password=mqtt_pass,
+        mqtt_client_id=str(node.get_parameter("mqtt_client_id").value).strip() or "manekin-rx-01",
+        mqtt_alerts_enabled=bool(node.get_parameter("mqtt_alerts_enabled").value),
         device_id=str(node.get_parameter("device_id").value),
         http_enabled=bool(node.get_parameter("http_enabled").value),
         http_base_url=str(node.get_parameter("http_base_url").value),
         ingest_api_key=str(node.get_parameter("ingest_api_key").value),
         http_timeout_sec=float(node.get_parameter("http_timeout_sec").value),
+        http_legacy_endpoints=bool(node.get_parameter("http_legacy_endpoints").value),
     )
 
 
@@ -1603,14 +2003,21 @@ def split_and_verify_crc(complete_data: bytes) -> Tuple[bytes, str]:
 
 
 def decode_compact_alert(text: str) -> Dict[str, object]:
-    if len(text) != 12 or not text.startswith("A1"):
+    if len(text) == 12 and text.startswith("A1"):
+        mannequin_id: Optional[int] = None
+        body = text[2:]
+    elif len(text) == 13 and text.startswith("A2"):
+        raw_mid = int(text[2:3], 16)
+        mannequin_id = raw_mid if raw_mid > 0 else None
+        body = text[3:]
+    else:
         raise ValueError(f"Format alert kompak tidak valid: {text!r}")
 
-    sequence = int(text[2:6], 16)
-    severity_code = int(text[6:7], 16)
-    event_code = int(text[7:9], 16)
-    status_code = int(text[9:10], 16)
-    device_mask = int(text[10:12], 16)
+    sequence = int(body[0:4], 16)
+    severity_code = int(body[4:5], 16)
+    event_code = int(body[5:7], 16)
+    status_code = int(body[7:8], 16)
+    device_mask = int(body[8:10], 16)
 
     severity = ALERT_SEVERITY_NAMES.get(severity_code, f"SEVERITY_{severity_code}")
     code = ALERT_EVENT_NAMES.get(event_code, f"EVENT_{event_code:02X}")
@@ -1620,6 +2027,7 @@ def decode_compact_alert(text: str) -> Dict[str, object]:
     ]
 
     return {
+        "mannequin_id": mannequin_id,
         "sequence": sequence,
         "severity": severity,
         "code": code,
@@ -1847,6 +2255,29 @@ def format_manekin_horizontal(d: Dict[str, Optional[float]]) -> str:
 # NODE ROS2 RECEIVER MANEKIN 1 (+ WEB FORWARDER + LOCAL LOGGER)
 # ============================================================
 
+def _resolve_auto_boot_count(log_dir: str, log_enabled: bool = True) -> int:
+    """Menghasilkan boot_count monotonik agar restart RX tidak bentrok deduplikasi DB."""
+    epoch_boot = max(1, int(time.time()) - 1_700_000_000)
+    prev_boot = 0
+    state_file = os.path.join(os.path.expanduser(log_dir), ".web_boot_count")
+    try:
+        if os.path.exists(state_file):
+            with open(state_file, "r", encoding="utf-8") as fh:
+                prev_boot = int((fh.read() or "0").strip())
+    except Exception:
+        prev_boot = 0
+
+    boot = min(2_147_483_647, max(1, epoch_boot, prev_boot + 1))
+    if log_enabled:
+        try:
+            os.makedirs(os.path.dirname(state_file), exist_ok=True)
+            with open(state_file, "w", encoding="utf-8") as fh:
+                fh.write(f"{boot}\n")
+        except Exception:
+            pass
+    return boot
+
+
 class LoRaManekin1ReceiverNode(Node):
     """Node ROS2 receiver LoRa P2P standalone + Web Forwarder + Local CSV Communication Logger."""
 
@@ -1858,24 +2289,31 @@ class LoRaManekin1ReceiverNode(Node):
 
         self.declare_parameter("frag_timeout", 3.0)
         self.declare_parameter("mannequin_id", 1)
-        self.declare_parameter("boot_count", 1)
+        self.declare_parameter("boot_count", 0)
         self.declare_parameter("log_enabled", DEFAULT_LOG_ENABLED)
         self.declare_parameter("log_dir", DEFAULT_LOG_DIR)
 
         frag_timeout = float(self.get_parameter("frag_timeout").value)
         self.default_mannequin_id = int(self.get_parameter("mannequin_id").value)
-        self.boot_count = int(self.get_parameter("boot_count").value)
+        configured_boot = int(self.get_parameter("boot_count").value)
         log_enabled = bool(self.get_parameter("log_enabled").value)
         log_dir = str(self.get_parameter("log_dir").value)
+        self.boot_count = (
+            configured_boot
+            if configured_boot > 0
+            else _resolve_auto_boot_count(log_dir, log_enabled=log_enabled)
+        )
 
         self.packet_count = 0
         self.alert_count = 0
         self.crc_error_count = 0
         self.frag_timeout_count = 0
         self.web_seq = 0
+        self.web_seq_by_mannequin: Dict[int, int] = {}
         self.last_rssi = "-"
         self.last_snr = "-"
         self.last_packet_monotonic: Optional[float] = None
+        self.last_packet_by_mannequin: Dict[int, float] = {}
         self.assembler = FragmentAssembler(frag_timeout)
 
         # Logger CSV Lokal di ~/blackbox2_ws/logs/communication/
@@ -1895,7 +2333,7 @@ class LoRaManekin1ReceiverNode(Node):
             for group_name in SENSOR_GROUPS
         }
 
-        # Pengirim langsung ke Web Backend (MQTT Compact V2 & HTTP REST)
+        # Pengirim langsung ke Web Backend (MQTTS Compact V2 & Opsional HTTP REST)
         self.web_forwarder = WebTelemetryForwarder(
             config=web_config,
             logger=self.get_logger(),
@@ -1911,24 +2349,36 @@ class LoRaManekin1ReceiverNode(Node):
         self.create_timer(0.005, self.read_serial_data)
         self.create_timer(0.5, self.check_frag_timeout)
 
-        active_dev_id = web_config.resolve_device_id(self.default_mannequin_id)
         key_state = "SET" if web_config.ingest_api_key else "EMPTY"
+        mqtt_pass_state = "SET" if web_config.mqtt_password else "EMPTY"
+        mqtt_scheme = web_config.effective_mqtt_scheme()
         self.get_logger().info(
             f"LoRa Manekin Receiver started on {self.radio.active_port} "
             f"@ {self.radio_config.baudrate} | Freq:{self.radio_config.freq} SF{self.radio_config.sf} "
-            f"BW{self.radio_config.bw} CR{self.radio_config.cr} | {NUM_PARAMS} params | "
+            f"BW{self.radio_config.bw} CR{self.radio_config.cr} | {NUM_PARAMS} params | boot={self.boot_count} | "
             f"LocalLog:{self.comm_logger.log_dir} | "
-            f"WebHTTP:{web_config.http_enabled} ({web_config.http_base_url}, key={key_state}) | "
-            f"WebMQTT:{web_config.mqtt_enabled} (topic=smart-mannequin/{active_dev_id}/telemetry)"
+            f"WebMQTT:{web_config.mqtt_enabled} ({mqtt_scheme}://{web_config.mqtt_host}:{web_config.mqtt_port}, "
+            f"tls={web_config.mqtt_tls}, client_id={web_config.mqtt_client_id}, "
+            f"user={web_config.mqtt_username or '-'}, pass={mqtt_pass_state}, qos=1, retain=False) | "
+            f"WebHTTP:{web_config.http_enabled} ({web_config.http_base_url}, key={key_state})"
         )
 
-    def _compute_inter_packet_timing(self) -> Tuple[Optional[float], Optional[float]]:
+    def _compute_inter_packet_timing(
+        self, mannequin_id: Optional[int] = None
+    ) -> Tuple[Optional[float], Optional[float]]:
         now = time.monotonic()
-        if self.last_packet_monotonic is None:
-            self.last_packet_monotonic = now
-            return None, None
-        delta_sec = now - self.last_packet_monotonic
         self.last_packet_monotonic = now
+        if mannequin_id is None:
+            return None, None
+        by_mid = getattr(self, "last_packet_by_mannequin", None)
+        if by_mid is None:
+            by_mid = {}
+            self.last_packet_by_mannequin = by_mid
+        prev = by_mid.get(mannequin_id)
+        by_mid[mannequin_id] = now
+        if prev is None:
+            return None, None
+        delta_sec = now - prev
         inter_ms = delta_sec * 1000.0
         rate_hz = (1.0 / delta_sec) if delta_sec > 0 else None
         return inter_ms, rate_hz
@@ -1978,7 +2428,6 @@ class LoRaManekin1ReceiverNode(Node):
         self, complete_data: bytes, total_frags: int, elapsed_ms: float
     ) -> None:
         self.packet_count += 1
-        inter_ms, rate_hz = self._compute_inter_packet_timing()
 
         if complete_data.startswith((b"B2", b"Z2")):
             try:
@@ -1998,8 +2447,8 @@ class LoRaManekin1ReceiverNode(Node):
                     byte_len=len(complete_data),
                     fragments=total_frags,
                     reassembly_ms=elapsed_ms,
-                    inter_packet_ms=inter_ms,
-                    packet_rate_hz=rate_hz,
+                    inter_packet_ms=None,
+                    packet_rate_hz=None,
                     crc_status="CRC_ERROR",
                     crc_hex="MISMATCH",
                     crc_errors_total=self.crc_error_count,
@@ -2015,6 +2464,7 @@ class LoRaManekin1ReceiverNode(Node):
                 )
                 return
 
+            inter_ms, rate_hz = self._compute_inter_packet_timing(mannequin_id)
             self._publish_telemetry(
                 sensor_dict=sensor_dict,
                 mannequin_id=mannequin_id,
@@ -2044,8 +2494,8 @@ class LoRaManekin1ReceiverNode(Node):
                 byte_len=len(complete_data),
                 fragments=total_frags,
                 reassembly_ms=elapsed_ms,
-                inter_packet_ms=inter_ms,
-                packet_rate_hz=rate_hz,
+                inter_packet_ms=None,
+                packet_rate_hz=None,
                 crc_status="CRC_ERROR",
                 crc_hex="MISMATCH",
                 crc_errors_total=self.crc_error_count,
@@ -2069,14 +2519,14 @@ class LoRaManekin1ReceiverNode(Node):
             )
             return
 
-        if text.startswith("A1") and len(text) == 12:
+        if (text.startswith("A1") and len(text) == 12) or (text.startswith("A2") and len(text) == 13):
             self._handle_alert(
-                text, len(complete_data), total_frags, elapsed_ms, inter_ms, rate_hz, crc_hex
+                text, len(complete_data), total_frags, elapsed_ms, None, None, crc_hex
             )
             return
 
         self._handle_json_payload(
-            text, len(complete_data), total_frags, elapsed_ms, inter_ms, rate_hz, crc_hex
+            text, len(complete_data), total_frags, elapsed_ms, None, None, crc_hex
         )
 
     def _handle_alert(
@@ -2095,10 +2545,14 @@ class LoRaManekin1ReceiverNode(Node):
             self.get_logger().warning(f"[RX #{self.packet_count:04d}] {exc}")
             return
 
+        alert_mid = int(decoded.get("mannequin_id") or self.default_mannequin_id)
+        if inter_ms is None and rate_hz is None:
+            inter_ms, rate_hz = self._compute_inter_packet_timing(alert_mid)
+
         self.alert_count += 1
         alert_payload = {
             "source": "lora_rx_manekin",
-            "mannequin_id": self.default_mannequin_id,
+            "mannequin_id": alert_mid,
             "sequence": decoded["sequence"],
             "severity": decoded["severity"],
             "code": decoded["code"],
@@ -2116,12 +2570,12 @@ class LoRaManekin1ReceiverNode(Node):
             "received_at_ms": int(time.time() * 1000),
         }
         publish_json(self.alert_pub, alert_payload)
-        self.web_forwarder.enqueue_alert(self.default_mannequin_id, alert_payload)
+        self.web_forwarder.enqueue_alert(alert_mid, alert_payload)
 
         # Simpan ke CSV komunikasi & CSV alert lokal
         self.comm_logger.log_communication(
             packet_no=self.packet_count,
-            mannequin_id=self.default_mannequin_id,
+            mannequin_id=alert_mid,
             packet_type="alert",
             payload_mode="alert",
             rssi=self.last_rssi,
@@ -2145,7 +2599,7 @@ class LoRaManekin1ReceiverNode(Node):
         self.comm_logger.log_alert(
             packet_no=self.packet_count,
             alert_no=self.alert_count,
-            mannequin_id=self.default_mannequin_id,
+            mannequin_id=alert_mid,
             rssi=self.last_rssi,
             snr=self.last_snr,
             byte_len=byte_len,
@@ -2153,7 +2607,7 @@ class LoRaManekin1ReceiverNode(Node):
         )
 
         self._publish_radio_status(
-            mannequin_id=self.default_mannequin_id,
+            mannequin_id=alert_mid,
             valid_fields=0,
             byte_len=byte_len,
             total_frags=total_frags,
@@ -2165,7 +2619,7 @@ class LoRaManekin1ReceiverNode(Node):
 
         pkt_label = "1Paket" if total_frags == 1 else f"{total_frags}Frg"
         self.get_logger().warning(
-            f"[RX #{self.packet_count:04d}] [M{self.default_mannequin_id} ALERT #{self.alert_count:04d}] "
+            f"[RX #{self.packet_count:04d}] [M{alert_mid} ALERT #{self.alert_count:04d}] "
             f"[{byte_len}B {pkt_label}] [{self.last_rssi}dBm {self.last_snr}dB] "
             f"seq={decoded['sequence']} sev={decoded['severity']} code={decoded['code']} "
             f"status={decoded['status']} offline={decoded['offline_devices']}"
@@ -2214,6 +2668,9 @@ class LoRaManekin1ReceiverNode(Node):
                 f"[RX #{self.packet_count:04d}] Tipe JSON tidak didukung: {type(parsed).__name__}"
             )
             return
+
+        if inter_ms is None and rate_hz is None:
+            inter_ms, rate_hz = self._compute_inter_packet_timing(mannequin_id)
 
         self._publish_telemetry(
             sensor_dict=sensor_dict,
@@ -2279,14 +2736,20 @@ class LoRaManekin1ReceiverNode(Node):
         web_v2_obj: Optional[Dict[str, object]] = None,
     ) -> None:
         valid_fields = sum(1 for v in sensor_dict.values() if v is not None)
-        self.web_seq = (self.web_seq + 1) & 0x7FFFFFFF
+        seq_map = getattr(self, "web_seq_by_mannequin", None)
+        if seq_map is None:
+            seq_map = {}
+            self.web_seq_by_mannequin = seq_map
+        next_seq = (seq_map.get(mannequin_id, 0) + 1) & 0x7FFFFFFF
+        seq_map[mannequin_id] = next_seq
+        self.web_seq = (getattr(self, "web_seq", 0) + 1) & 0x7FFFFFFF
 
         if web_v2_obj is None:
             web_v2_obj = build_web_v2_payload(
                 sensor_dict=sensor_dict,
                 mannequin_id=mannequin_id,
                 boot_count=self.boot_count,
-                seq=self.web_seq,
+                seq=next_seq,
             )
 
         # 1. Topic ROS 2 Web Compact V2 (/telemetri/web/v2)
@@ -2373,7 +2836,7 @@ class LoRaManekin1ReceiverNode(Node):
         if self.web_forwarder.config.mqtt_enabled or not web_parts:
             web_parts.append(
                 f"MQTT:{self.web_forwarder.mqtt_sent_count}"
-                f"(ACK:{self.web_forwarder.last_ack_status})"
+                f"(fail:{self.web_forwarder.mqtt_fail_count},ACK:{self.web_forwarder.last_ack_status})"
             )
         web_info = " ".join(web_parts)
 

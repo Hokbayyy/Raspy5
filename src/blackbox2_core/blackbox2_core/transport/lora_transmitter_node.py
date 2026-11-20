@@ -6,6 +6,7 @@ from datetime import datetime
 import json
 import math
 import os
+import random
 import struct
 import time
 import threading
@@ -311,7 +312,7 @@ LOADCELL_INDEX_KEYS = [
 
 # ============================================================
 # WEB COMPACT V2 READING ID MAPPING (Be-smart-manekin)
-# Mannequin 1: 1001..1095 | Mannequin 2: otomatis +1000 (2001..2095)
+# Mannequin 1: 1001..1095, 1098..1111 | Mannequin 2: otomatis +1000
 # ============================================================
 
 WEB_READING_ID_MAP_M1 = {
@@ -369,6 +370,24 @@ WEB_READING_ID_MAP_M1 = {
 
     # 7. Thermal (1095)
     "thermal": 1095,
+
+    # 8. Loadcell YZC-133 (1098..1102; 1096..1097 cadangan thermal)
+    "loadcell_leher": 1098,
+    "loadcell_paki": 1099,
+    "loadcell_paka": 1100,
+    "loadcell_kaki": 1101,
+    "loadcell_kaka": 1102,
+
+    # 9. WitMotion WITSENSOR_AHRS (1103..1111)
+    "ax": 1103,
+    "ay": 1104,
+    "az": 1105,
+    "gx": 1106,
+    "gy": 1107,
+    "gz": 1108,
+    "roll": 1109,
+    "pitch": 1110,
+    "yaw": 1111,
 }
 
 GRAVITY_MS2 = 9.80665
@@ -620,6 +639,9 @@ class LoRaTransmitterNode(Node):
         self.transmitted_count = 0
         self.failed_count = 0
         self._last_single_uplink_warn = 0.0
+        # Stagger fase TX agar M1 (+0.0s) dan M2 (+0.45s) tidak terus bertabrakan di 1 RX
+        initial_offset = 0.45 if (self.mannequin_id % 2 == 0) else 0.0
+        self._next_telemetry_at = time.monotonic() + initial_offset
 
         self.received_sources = set()
 
@@ -706,7 +728,7 @@ class LoRaTransmitterNode(Node):
         # ====================================================
 
         self.transmit_timer = self.create_timer(
-            TRANSMIT_INTERVAL,
+            0.05,
             self.transmit_callback
         )
 
@@ -1434,9 +1456,9 @@ class LoRaTransmitterNode(Node):
     # ========================================================
 
     def alert_callback(self, msg):
-        """Encode a JSON alert as a compact 12-byte ASCII payload.
+        """Encode a JSON alert as a compact 13-byte ASCII payload (A2 with mannequin_id).
 
-        Layout: A1 + sequence(4 hex) + severity(1 hex) +
+        Layout: A2 + mannequin_id(1 hex) + sequence(4 hex) + severity(1 hex) +
                 event(2 hex) + status(1 hex) + offline-mask(2 hex).
         CRC16 is appended by fragment_packet() (1 single uplink, no FRG split).
         """
@@ -1496,11 +1518,12 @@ class LoRaTransmitterNode(Node):
                     device_mask |= (1 << bit)
 
             self.alert_sequence = (self.alert_sequence + 1) & 0xFFFF
+            mid_nibble = max(1, min(7, int(self.mannequin_id)))
             compact = (
-                f"A1{self.alert_sequence:04X}{severity:X}"
+                f"A2{mid_nibble:X}{self.alert_sequence:04X}{severity:X}"
                 f"{event_code:02X}{status:X}{device_mask:02X}"
             )
-            if len(compact) != 12:
+            if len(compact) != 13:
                 raise ValueError(f"Invalid compact alert length: {len(compact)}")
 
             fragment = self.fragment_packet(compact)
@@ -1659,11 +1682,17 @@ class LoRaTransmitterNode(Node):
 
     def transmit_callback(self):
 
+        now = time.monotonic()
+        if now < getattr(self, "_next_telemetry_at", 0.0):
+            return
+
         # Jangan kirim paket kosong sebelum menerima data sensor.
         with self.lock:
 
             if not self.latest_values:
                 return
+
+        self._next_telemetry_at = now + TRANSMIT_INTERVAL + random.uniform(-0.04, 0.04)
 
         try:
 
