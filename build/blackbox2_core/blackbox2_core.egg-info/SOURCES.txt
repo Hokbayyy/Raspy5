@@ -35,6 +35,7 @@ blackbox2_core/sensors/imu/__init__.py
 blackbox2_core/sensors/imu/witmotion_node.py
 blackbox2_core/sensors/uart/__init__.py
 blackbox2_core/transport/__init__.py
+blackbox2_core/transport/lora_rxManekin1.py
 blackbox2_core/transport/lora_transmitter_node.py
 config/devices.yaml
 config/sensors.yaml
