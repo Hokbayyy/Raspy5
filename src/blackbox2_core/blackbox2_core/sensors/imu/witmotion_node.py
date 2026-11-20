@@ -47,7 +47,7 @@ class WitMotionNode(Node):
         # -----------------------------------------------------
 
         self.declare_parameter('port', '/dev/ttyACM0')
-        self.declare_parameter('baudrate', 115200)
+        self.declare_parameter('baudrate', 9600)
         self.declare_parameter('polling_rate', 20.0)
         self.declare_parameter('serial_timeout', 0.01)
 
