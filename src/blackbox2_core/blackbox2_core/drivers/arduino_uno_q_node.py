@@ -57,8 +57,7 @@ class ArduinoUnoQNode(Node):
         # SERIAL CONFIGURATION
         # ----------------------------------------------------
         self.port = '/dev/ttyAMA0'
-        self.baudrate = 921600
-
+        self.baudrate = 115200
         self.ser = serial.Serial(
             self.port,
             self.baudrate,

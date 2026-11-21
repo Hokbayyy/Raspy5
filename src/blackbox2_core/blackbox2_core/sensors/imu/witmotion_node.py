@@ -51,7 +51,7 @@ class WitMotionNode(Node):
         self.declare_parameter('polling_rate', 20.0)
         self.declare_parameter('serial_timeout', 0.01)
 
-        self.declare_parameter('calibration_duration', 120.0)
+        self.declare_parameter('calibration_duration', 20.0)
         self.declare_parameter('gyro_motion_threshold', 10.0)
         self.declare_parameter('accel_tolerance', 2.0)
 
