@@ -305,6 +305,10 @@ REVERSE_WEB_ID_MAP: Dict[int, str] = {
     rid: key for key, rid in WEB_READING_ID_MAP_M1.items()
 }
 
+# Backend reading_identity (reading-id-reference.json) does not bind raw MPU gyro (1010..1012 / 2010..2012)
+# or Mannequin 2 smoke (2006); omit them from Compact V2 web payloads so strict validation never rejects packets.
+UNBOUND_WEB_READING_IDS = frozenset({1010, 1011, 1012, 2006, 2010, 2011, 2012})
+
 SMARTSKIN_14_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("right arm", 1),
     ("right arm", 2),
@@ -2201,6 +2205,7 @@ def build_web_v2_payload(
     readings = [
         [base_id + id_offset, sensor_dict.get(key)]
         for key, base_id in WEB_READING_ID_MAP_M1.items()
+        if (base_id + id_offset) not in UNBOUND_WEB_READING_IDS
     ]
     return {
         "v": 2,
