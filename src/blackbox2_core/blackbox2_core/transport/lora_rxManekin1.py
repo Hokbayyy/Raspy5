@@ -83,7 +83,30 @@ DEFAULT_TX_POWER = 20
 # ============================================================
 
 DEFAULT_LOG_ENABLED = True
-DEFAULT_LOG_DIR = os.path.expanduser("~/blackbox2_ws/logs/communication")
+
+
+def _resolve_default_log_dir() -> str:
+    env_dir = (
+        os.environ.get("LORA_LOG_DIR", "").strip()
+        or os.environ.get("WEB_LOG_DIR", "").strip()
+    )
+    if env_dir:
+        return os.path.expanduser(env_dir)
+
+    default_ws_logs = os.path.expanduser("~/blackbox2_ws/logs/communication")
+    if os.path.isdir(os.path.expanduser("~/blackbox2_ws")):
+        return default_ws_logs
+
+    # Fallback ke <repo_root>/logs/communication jika dijalankan dari clone repo selain ~/blackbox2_ws
+    repo_root = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
+    )
+    if os.path.isdir(os.path.join(repo_root, "src")):
+        return os.path.join(repo_root, "logs", "communication")
+    return default_ws_logs
+
+
+DEFAULT_LOG_DIR = _resolve_default_log_dir()
 
 # ============================================================
 # KONFIGURASI DEFAULT PENGIRIMAN KE WEB (Be-smart-manekin)
@@ -624,6 +647,8 @@ class LocalCommunicationLogger:
         with self._lock:
             try:
                 self._comm_writer.writerow(row)
+                if self._comm_file is not None:
+                    self._comm_file.flush()
             except Exception as exc:
                 self.logger.warning(f"Gagal menulis lora_rx_communication.csv: {exc}")
 
@@ -664,6 +689,8 @@ class LocalCommunicationLogger:
         with self._lock:
             try:
                 self._telemetry_writer.writerow(row)
+                if self._telemetry_file is not None:
+                    self._telemetry_file.flush()
             except Exception as exc:
                 self.logger.warning(f"Gagal menulis lora_rx_telemetry.csv: {exc}")
 
@@ -705,6 +732,8 @@ class LocalCommunicationLogger:
         with self._lock:
             try:
                 self._alert_writer.writerow(row)
+                if self._alert_file is not None:
+                    self._alert_file.flush()
             except Exception as exc:
                 self.logger.warning(f"Gagal menulis lora_rx_alerts.csv: {exc}")
 
@@ -1915,8 +1944,10 @@ def parse_rx_event(line: str) -> Optional[Tuple[str, str, str]]:
         return None
 
     idx = line.find("RXP2P")
-    after = line[idx + len("RXP2P"):].strip().lstrip(": ")
+    after = line[idx + len("RXP2P"):].strip().lstrip(":, ")
     tokens = [t.strip() for t in after.split(":") if t.strip()]
+    if len(tokens) < 3 and "," in after:
+        tokens = [t.strip() for t in after.split(",") if t.strip()]
 
     if len(tokens) >= 3:
         rssi, snr = tokens[0], tokens[1]
@@ -2388,6 +2419,45 @@ class LoRaManekin1ReceiverNode(Node):
         rate_hz = (1.0 / delta_sec) if delta_sec > 0 else None
         return inter_ms, rate_hz
 
+    def _log_comm_event(
+        self,
+        *,
+        mannequin_id: Optional[int] = None,
+        packet_type: str,
+        payload_mode: str,
+        byte_len: int,
+        fragments: int,
+        reassembly_ms: float = 0.0,
+        inter_packet_ms: Optional[float] = None,
+        packet_rate_hz: Optional[float] = None,
+        crc_status: str = "OK",
+        crc_hex: str = "NONE",
+        valid_fields: int = 0,
+    ) -> None:
+        self.comm_logger.log_communication(
+            packet_no=self.packet_count,
+            mannequin_id=self.default_mannequin_id if mannequin_id is None else mannequin_id,
+            packet_type=packet_type,
+            payload_mode=payload_mode,
+            rssi=self.last_rssi,
+            snr=self.last_snr,
+            radio_cfg=self.radio_config,
+            byte_len=byte_len,
+            fragments=fragments,
+            reassembly_ms=reassembly_ms,
+            inter_packet_ms=inter_packet_ms,
+            packet_rate_hz=packet_rate_hz,
+            crc_status=crc_status,
+            crc_hex=crc_hex,
+            crc_errors_total=self.crc_error_count,
+            frag_timeouts_total=self.frag_timeout_count,
+            valid_fields=valid_fields,
+            total_fields=NUM_PARAMS,
+            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
+            web_ack_status=self.web_forwarder.last_ack_status,
+            web_http_sent=self.web_forwarder.http_sent_count,
+        )
+
     def read_serial_data(self) -> None:
         if not self.radio.is_connected:
             self.radio.reconnect_if_due()
@@ -2408,6 +2478,16 @@ class LoRaManekin1ReceiverNode(Node):
             try:
                 raw_bytes = bytes.fromhex(hex_str)
             except ValueError:
+                self.packet_count += 1
+                self.last_rssi = rssi or "-"
+                self.last_snr = snr or "-"
+                self._log_comm_event(
+                    packet_type="rx_error",
+                    payload_mode="invalid_hex",
+                    byte_len=len(hex_str),
+                    fragments=1,
+                    crc_status="HEX_ERROR",
+                )
                 self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
                 continue
             self.handle_received_bytes(raw_bytes, rssi, snr)
@@ -2420,11 +2500,27 @@ class LoRaManekin1ReceiverNode(Node):
             try:
                 assembled = self.assembler.add_fragment(raw_bytes)
             except Exception as exc:
+                self.packet_count += 1
+                self._log_comm_event(
+                    packet_type="frag_error",
+                    payload_mode="invalid_fragment",
+                    byte_len=len(raw_bytes),
+                    fragments=1,
+                    crc_status="FRAG_ERROR",
+                )
                 self.get_logger().error(f"Gagal memproses fragmen FRG: {exc}")
                 return
             if assembled is not None:
                 complete_data, total_frags, elapsed_ms = assembled
                 self.process_complete_data(complete_data, total_frags, elapsed_ms)
+            else:
+                self._log_comm_event(
+                    packet_type="fragment",
+                    payload_mode=f"frag_{len(self.assembler._chunks)}_of_{self.assembler._total}",
+                    byte_len=len(raw_bytes),
+                    fragments=self.assembler._total or 1,
+                    crc_status="FRAG_PART",
+                )
             return
 
         self.process_complete_data(raw_bytes, total_frags=1, elapsed_ms=0.0)
@@ -2519,6 +2615,15 @@ class LoRaManekin1ReceiverNode(Node):
         try:
             text = payload_bytes.decode("utf-8").strip()
         except UnicodeDecodeError as exc:
+            self._log_comm_event(
+                packet_type="rx_error",
+                payload_mode="invalid_utf8",
+                byte_len=len(complete_data),
+                fragments=total_frags,
+                reassembly_ms=elapsed_ms,
+                crc_status="UTF8_ERROR",
+                crc_hex=crc_hex,
+            )
             self.get_logger().warning(
                 f"[RX #{self.packet_count:04d}] Payload bukan UTF-8 valid ({exc})."
             )
@@ -2547,6 +2652,15 @@ class LoRaManekin1ReceiverNode(Node):
         try:
             decoded = decode_compact_alert(text)
         except ValueError as exc:
+            self._log_comm_event(
+                packet_type="rx_error",
+                payload_mode="invalid_alert",
+                byte_len=byte_len,
+                fragments=total_frags,
+                reassembly_ms=elapsed_ms,
+                crc_status="ALERT_ERROR",
+                crc_hex=crc_hex,
+            )
             self.get_logger().warning(f"[RX #{self.packet_count:04d}] {exc}")
             return
 
@@ -2643,6 +2757,15 @@ class LoRaManekin1ReceiverNode(Node):
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError as exc:
+            self._log_comm_event(
+                packet_type="rx_error",
+                payload_mode="invalid_json",
+                byte_len=byte_len,
+                fragments=total_frags,
+                reassembly_ms=elapsed_ms,
+                crc_status="JSON_ERROR",
+                crc_hex=crc_hex,
+            )
             self.get_logger().warning(
                 f"[RX #{self.packet_count:04d}] Gagal parse JSON ({exc}): {text[:80]}"
             )
@@ -2669,6 +2792,15 @@ class LoRaManekin1ReceiverNode(Node):
                 key: valid_number(source_obj.get(key)) for key in EXPECTED_KEYS
             }
         else:
+            self._log_comm_event(
+                packet_type="rx_error",
+                payload_mode=f"unsupported_json_{type(parsed).__name__}",
+                byte_len=byte_len,
+                fragments=total_frags,
+                reassembly_ms=elapsed_ms,
+                crc_status="UNSUPPORTED_JSON",
+                crc_hex=crc_hex,
+            )
             self.get_logger().warning(
                 f"[RX #{self.packet_count:04d}] Tipe JSON tidak didukung: {type(parsed).__name__}"
             )
