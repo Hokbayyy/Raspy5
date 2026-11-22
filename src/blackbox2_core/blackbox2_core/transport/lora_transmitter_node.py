@@ -411,6 +411,16 @@ F16_NAN_BYTES = b"\xFF\x7F"
 INT16_SENTINEL = -32768
 UINT16_SENTINEL = 0xFFFF
 
+# Urutan 18 fitur Edge AI LSTM-Autoencoder (Bit 14..10 dalam 2 byte AI frame B3/Z3)
+AI_TARGET_FEATURES = [
+    "ADXL345_X", "ADXL345_Y", "ADXL345_Z",
+    "Kalman_ADXL_X", "Kalman_ADXL_Y", "Kalman_ADXL_Z",
+    "MPU6050_X", "MPU6050_Y", "MPU6050_Z",
+    "Kalman_MPU_X", "Kalman_MPU_Y", "Kalman_MPU_Z",
+    "LiDAR", "LiDAR_Kalman",
+    "CO", "CO2", "NH3", "Gas_Sensor",
+]
+
 
 def encode_pressed_parts(values, mannequin_id: int = 1):
     """
@@ -489,40 +499,41 @@ def encode_pressed_body(values, mannequin_id: int = 1) -> bytes:
 
 
 def _pack_pressed_candidate(raw_body: bytes, allow_zlib: bool) -> bytes:
-    """Membungkus body menjadi frame B2 (atau Z2 zlib bila lebih kecil)."""
-    b2_head_body = b"B2" + raw_body
-    b2_frame = b2_head_body + struct.pack(">H", crc16_ccitt(b2_head_body))
+    """Membungkus body menjadi frame B3 (atau Z3 zlib bila lebih kecil)."""
+    b3_head_body = b"B3" + raw_body
+    b3_frame = b3_head_body + struct.pack(">H", crc16_ccitt(b3_head_body))
 
     if allow_zlib:
         try:
             z_body = zlib.compress(raw_body, 9)
-            z2_head_body = b"Z2" + z_body
-            z2_frame = z2_head_body + struct.pack(">H", crc16_ccitt(z2_head_body))
-            if len(z2_frame) < len(b2_frame):
-                return z2_frame
+            z3_head_body = b"Z3" + z_body
+            z3_frame = z3_head_body + struct.pack(">H", crc16_ccitt(z3_head_body))
+            if len(z3_frame) < len(b3_frame):
+                return z3_frame
         except Exception:
             pass
 
-    return b2_frame
+    return b3_frame
 
 
 def build_pressed_frame(
     values,
+    ai_bytes: bytes = b"\x00\x7C",
     mannequin_id: int = 1,
     allow_zlib: bool = True,
     max_bytes: int = MAX_SINGLE_LORA_PAYLOAD,
 ) -> bytes:
     """
     Membungkus body biner menjadi 1 frame uplink tunggal siap kirim LoRa:
-      - B2 + body + CRC16(2B)   [maks 236 byte untuk 109 sensor tanpa overflow]
-      - Z2 + zlib(body) + CRC16 [dipakai otomatis jika hasil kompresi lebih kecil]
+      - B3 + bitmask(14B) + primary(<=218B) + ai_bytes(2B) + overflow + CRC16(2B) [maks 238 byte tanpa overflow]
+      - Z3 + zlib(body) + CRC16 [dipakai otomatis jika hasil kompresi lebih kecil]
     Jika max_bytes diset (default 238 byte), overflow tail yang melebihi budget
     dipangkas otomatis (binary search jumlah maksimal tail) agar selalu <= 1 uplink.
     """
     bitmask, primary_bytes, overflow_chunks = encode_pressed_parts(
         values, mannequin_id=mannequin_id
     )
-    base_bytes = bitmask + primary_bytes
+    base_bytes = bitmask + primary_bytes + ai_bytes
 
     full_frame = _pack_pressed_candidate(
         base_bytes + b"".join(overflow_chunks),
@@ -712,6 +723,13 @@ class LoRaTransmitterNode(Node):
         self.alert_sequence = 0
         self.alert_tx_queue = deque(maxlen=10)
 
+        # Status Edge AI LSTM-Autoencoder terbaru (dikemas ke 2 byte B3/Z3)
+        self.latest_ai_state = {
+            "is_anomaly": False,
+            "dominant_idx": 31,
+            "rmse_x100": 0,
+        }
+
         # Inisialisasi CSV Logger Lokal di ~/blackbox2_ws/logs/communication/
         self.comm_csv_file = None
         self.comm_csv_writer = None
@@ -783,6 +801,14 @@ class LoRaTransmitterNode(Node):
             String,
             "/system/alerts",
             self.alert_callback,
+            10
+        )
+
+        # Edge AI LSTM-Autoencoder status (/ai/anomaly_status)
+        self.ai_sub = self.create_subscription(
+            String,
+            "/ai/anomaly_status",
+            self.ai_status_callback,
             10
         )
 
@@ -912,7 +938,7 @@ class LoRaTransmitterNode(Node):
 
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
         crc_hex = "NONE"
-        if fragment.startswith((b"B2", b"Z2")) and len(fragment) >= 4:
+        if fragment.startswith((b"B2", b"Z2", b"B3", b"Z3")) and len(fragment) >= 4:
             crc_hex = f"{struct.unpack('>H', fragment[-2:])[0]:04X}"
         elif b"*" in fragment:
             try:
@@ -922,6 +948,10 @@ class LoRaTransmitterNode(Node):
 
         if packet_type == "alert":
             logged_mode = "alert"
+        elif fragment.startswith(b"Z3"):
+            logged_mode = "packed_z3"
+        elif fragment.startswith(b"B3"):
+            logged_mode = "packed_b3"
         elif fragment.startswith(b"Z2"):
             logged_mode = "packed_z2"
         elif fragment.startswith(b"B2"):
@@ -1558,6 +1588,8 @@ class LoRaTransmitterNode(Node):
             details = alert.get("details") or {}
             if not isinstance(details, dict):
                 details = {}
+            if (details.get("device_event") or {}).get("event_type") == "AI_ANOMALY_DETECTED":
+                return
             system = details.get("system_status") or {}
             if not isinstance(system, dict):
                 system = {}
@@ -1635,12 +1667,53 @@ class LoRaTransmitterNode(Node):
             allow_nan=False
         )
 
+    # ========================================================
+    # EDGE AI ANOMALY STATUS CALLBACK (/ai/anomaly_status)
+    # ========================================================
+
+    def ai_status_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+            if not isinstance(data, dict):
+                return
+            is_anom = bool(data.get("is_anomaly", False))
+            rmse = float(data.get("rmse", 0.0))
+            if not math.isfinite(rmse):
+                rmse = 0.0
+            dom_feat = str(data.get("dominant_feature", ""))
+            dom_idx = (
+                AI_TARGET_FEATURES.index(dom_feat)
+                if dom_feat in AI_TARGET_FEATURES
+                else 31
+            )
+            rmse_scaled = max(0, min(1023, int(round(rmse * 100.0))))
+            with self.lock:
+                self.latest_ai_state = {
+                    "is_anomaly": is_anom,
+                    "dominant_idx": dom_idx,
+                    "rmse_x100": rmse_scaled,
+                }
+                self.received_sources.add("edge_ai")
+        except Exception as error:
+            self.get_logger().warning(f"Invalid AI status JSON: {error}")
+
+    def encode_ai_2bytes(self) -> bytes:
+        with self.lock:
+            st = dict(self.latest_ai_state)
+        packed_u16 = (
+            ((1 if st["is_anomaly"] else 0) << 15)
+            | ((st["dominant_idx"] & 0x1F) << 10)
+            | (st["rmse_x100"] & 0x03FF)
+        )
+        return struct.pack("<H", packed_u16)
+
     def build_pressed_packet(self):
 
         values = self._collect_ordered_values()
 
         return build_pressed_frame(
             values,
+            ai_bytes=self.encode_ai_2bytes(),
             mannequin_id=self.mannequin_id,
             allow_zlib=True,
             max_bytes=MAX_SINGLE_LORA_PAYLOAD,
@@ -1722,7 +1795,7 @@ class LoRaTransmitterNode(Node):
 
     def build_single_uplink_packet(self, web_v2_json: str = None) -> bytes:
         """Menghasilkan tepat 1 paket uplink LoRa (<= 238 byte)."""
-        if self.payload_mode in ("packed", "compressed", "binary", "b2"):
+        if self.payload_mode in ("packed", "compressed", "binary", "b2", "b3", "z3"):
             return self.build_pressed_packet()
 
         raw_json = (

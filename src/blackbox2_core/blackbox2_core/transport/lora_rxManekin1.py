@@ -323,6 +323,16 @@ REVERSE_WEB_ID_MAP: Dict[int, str] = {
 # or Mannequin 2 smoke (2006); omit them from Compact V2 web payloads so strict validation never rejects packets.
 UNBOUND_WEB_READING_IDS = frozenset({1010, 1011, 1012, 2006, 2010, 2011, 2012})
 
+# Urutan 18 fitur Edge AI LSTM-Autoencoder (Bit 14..10 dalam 2 byte AI frame B3/Z3)
+AI_TARGET_FEATURES: List[str] = [
+    "ADXL345_X", "ADXL345_Y", "ADXL345_Z",
+    "Kalman_ADXL_X", "Kalman_ADXL_Y", "Kalman_ADXL_Z",
+    "MPU6050_X", "MPU6050_Y", "MPU6050_Z",
+    "Kalman_MPU_X", "Kalman_MPU_Y", "Kalman_MPU_Z",
+    "LiDAR", "LiDAR_Kalman",
+    "CO", "CO2", "NH3", "Gas_Sensor",
+]
+
 SMARTSKIN_14_LOCATIONS: Tuple[Tuple[str, int], ...] = (
     ("right arm", 1),
     ("right arm", 2),
@@ -485,6 +495,9 @@ COMMUNICATION_CSV_HEADER: List[str] = [
     "web_mqtt_sent",
     "web_ack_status",
     "web_http_sent",
+    "ai_status",
+    "ai_dominant_feature",
+    "ai_rmse",
 ]
 
 TELEMETRY_CSV_HEADER: List[str] = [
@@ -499,6 +512,9 @@ TELEMETRY_CSV_HEADER: List[str] = [
     "reassembly_ms",
     "inter_packet_ms",
     "valid_fields",
+    "ai_status",
+    "ai_dominant_feature",
+    "ai_rmse",
     *EXPECTED_KEYS,
 ]
 
@@ -603,9 +619,14 @@ class LocalCommunicationLogger:
         web_mqtt_sent: int,
         web_ack_status: str,
         web_http_sent: int,
+        ai_detection: Optional[Dict[str, object]] = None,
     ) -> None:
         if not self.enabled or self._comm_writer is None:
             return
+
+        ai_status = "" if not ai_detection else str(ai_detection.get("status", ""))
+        ai_dom = "" if not ai_detection else str(ai_detection.get("dominant_feature", ""))
+        ai_rmse = "" if not ai_detection else ai_detection.get("rmse", "")
 
         row = [
             self._now_str(),
@@ -634,6 +655,9 @@ class LocalCommunicationLogger:
             web_mqtt_sent,
             web_ack_status,
             web_http_sent,
+            ai_status,
+            ai_dom,
+            ai_rmse,
         ]
         with self._lock:
             try:
@@ -656,9 +680,14 @@ class LocalCommunicationLogger:
         inter_packet_ms: Optional[float],
         valid_fields: int,
         sensor_dict: Dict[str, Optional[float]],
+        ai_detection: Optional[Dict[str, object]] = None,
     ) -> None:
         if not self.enabled or self._telemetry_writer is None:
             return
+
+        ai_status = "" if not ai_detection else str(ai_detection.get("status", ""))
+        ai_dom = "" if not ai_detection else str(ai_detection.get("dominant_feature", ""))
+        ai_rmse = "" if not ai_detection else ai_detection.get("rmse", "")
 
         row = [
             self._now_str(),
@@ -672,6 +701,9 @@ class LocalCommunicationLogger:
             round(reassembly_ms, 2),
             "" if inter_packet_ms is None else round(inter_packet_ms, 2),
             valid_fields,
+            ai_status,
+            ai_dom,
+            ai_rmse,
             *[
                 "" if sensor_dict.get(k) is None else sensor_dict.get(k)
                 for k in EXPECTED_KEYS
@@ -2181,10 +2213,10 @@ UINT16_SENTINEL = 0xFFFF
 
 def decode_pressed_telemetry(
     complete_data: bytes, default_mannequin_id: int
-) -> Tuple[int, Dict[str, Optional[float]], str, str]:
+) -> Tuple[int, Dict[str, Optional[float]], str, str, Optional[Dict[str, object]]]:
     """
-    Mendekode paket terkompresi (press) biner B2 / Z2 dari lora_transmitter_node.py.
-    Mengembalikan (mannequin_id, sensor_dict, payload_mode, crc_hex).
+    Mendekode paket terkompresi (press) biner B2/Z2 maupun B3/Z3 (dengan Edge AI 2B).
+    Mengembalikan (mannequin_id, sensor_dict, payload_mode, crc_hex, ai_detection).
     """
     if len(complete_data) < 4:
         raise ValueError(f"Panjang paket biner terlalu pendek: {len(complete_data)}B")
@@ -2198,7 +2230,19 @@ def decode_pressed_telemetry(
         )
     crc_hex = f"{expected_crc:04X}"
 
-    if body_with_magic.startswith(b"Z2"):
+    has_ai = False
+    if body_with_magic.startswith(b"Z3"):
+        try:
+            raw_body = zlib.decompress(body_with_magic[2:])
+        except zlib.error as exc:
+            raise ValueError(f"Gagal dekompresi Z3 zlib: {exc}") from exc
+        payload_mode = "packed_z3"
+        has_ai = True
+    elif body_with_magic.startswith(b"B3"):
+        raw_body = body_with_magic[2:]
+        payload_mode = "packed_b3"
+        has_ai = True
+    elif body_with_magic.startswith(b"Z2"):
         try:
             raw_body = zlib.decompress(body_with_magic[2:])
         except zlib.error as exc:
@@ -2208,10 +2252,10 @@ def decode_pressed_telemetry(
         raw_body = body_with_magic[2:]
         payload_mode = "packed_b2"
     else:
-        raise ValueError("Header paket biner bukan B2/Z2")
+        raise ValueError("Header paket biner bukan B2/Z2/B3/Z3")
 
     if len(raw_body) < 14:
-        raise ValueError(f"Body B2 tidak lengkap: {len(raw_body)}B (<14B)")
+        raise ValueError(f"Body biner tidak lengkap: {len(raw_body)}B (<14B)")
 
     bitmask = raw_body[:14]
     encoded_mid = (bitmask[13] >> 5) & 0x07
@@ -2221,12 +2265,13 @@ def decode_pressed_telemetry(
         idx for idx in range(NUM_PARAMS) if (bitmask[idx >> 3] & (1 << (idx & 7)))
     ]
     needed_primary = 14 + 2 * len(active_indices)
-    if len(raw_body) < needed_primary:
+    ai_len = 2 if has_ai else 0
+    if len(raw_body) < needed_primary + ai_len:
         raise ValueError(
-            f"Ukuran body B2 kurang ({len(raw_body)}B < {needed_primary}B)"
+            f"Ukuran body biner kurang ({len(raw_body)}B < {needed_primary + ai_len}B)"
         )
-    if (len(raw_body) - needed_primary) % 5 != 0:
-        raise ValueError("Ukuran overflow tail B2 tidak valid")
+    if (len(raw_body) - needed_primary - ai_len) % 5 != 0:
+        raise ValueError("Ukuran overflow tail biner tidak valid")
 
     sensor_dict: Dict[str, Optional[float]] = {key: None for key in EXPECTED_KEYS}
 
@@ -2258,7 +2303,27 @@ def decode_pressed_telemetry(
                 if math.isfinite(fval):
                     sensor_dict[key] = round(float(fval), 4)
 
-    ov_offset = needed_primary
+    ai_detection: Optional[Dict[str, object]] = None
+    if has_ai:
+        ai_u16 = struct.unpack("<H", raw_body[offset:offset + 2])[0]
+        offset += 2
+        is_anomaly = bool((ai_u16 >> 15) & 0x01)
+        dom_idx = (ai_u16 >> 10) & 0x1F
+        rmse_val = round((ai_u16 & 0x03FF) / 100.0, 2)
+        dom_feat = (
+            AI_TARGET_FEATURES[dom_idx]
+            if 0 <= dom_idx < len(AI_TARGET_FEATURES)
+            else "NONE"
+        )
+        ai_detection = {
+            "is_anomaly": is_anomaly,
+            "status": "ANOMALI" if is_anomaly else "NORMAL",
+            "dominant_idx": dom_idx,
+            "dominant_feature": dom_feat,
+            "rmse": rmse_val,
+        }
+
+    ov_offset = needed_primary + ai_len
     while ov_offset + 5 <= len(raw_body):
         idx, fval = struct.unpack_from("<Bf", raw_body, ov_offset)
         ov_offset += 5
@@ -2267,7 +2332,7 @@ def decode_pressed_telemetry(
             if valid_f is not None:
                 sensor_dict[EXPECTED_KEYS[idx]] = round(valid_f, 4)
 
-    return mannequin_id, sensor_dict, payload_mode, crc_hex
+    return mannequin_id, sensor_dict, payload_mode, crc_hex, ai_detection
 
 
 def build_web_v2_payload(
@@ -2566,9 +2631,9 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
     ) -> None:
         self.packet_count += 1
 
-        if complete_data.startswith((b"B2", b"Z2")):
+        if complete_data.startswith((b"B2", b"Z2", b"B3", b"Z3")):
             try:
-                mannequin_id, sensor_dict, payload_mode, crc_hex = (
+                mannequin_id, sensor_dict, payload_mode, crc_hex, ai_detection = (
                     decode_pressed_telemetry(complete_data, self.default_mannequin_id)
                 )
             except ValueError as exc:
@@ -2613,6 +2678,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                 rate_hz=rate_hz,
                 crc_hex=crc_hex,
                 web_v2_obj=None,
+                ai_detection=ai_detection,
             )
             return
 
@@ -2858,6 +2924,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         rate_hz: Optional[float],
         crc_hex: str,
         web_v2_obj: Optional[Dict[str, object]] = None,
+        ai_detection: Optional[Dict[str, object]] = None,
     ) -> None:
         valid_fields = sum(1 for v in sensor_dict.values() if v is not None)
         seq_map = getattr(self, "web_seq_by_mannequin", None)
@@ -2906,6 +2973,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
             web_ack_status=self.web_forwarder.last_ack_status,
             web_http_sent=self.web_forwarder.http_sent_count,
+            ai_detection=ai_detection,
         )
         self.comm_logger.log_telemetry(
             packet_no=self.packet_count,
@@ -2919,6 +2987,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             inter_packet_ms=inter_ms,
             valid_fields=valid_fields,
             sensor_dict=sensor_dict,
+            ai_detection=ai_detection,
         )
 
         # 3. Log 1 baris horizontal bersih
@@ -2935,12 +3004,18 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                 f"(fail:{self.web_forwarder.mqtt_fail_count},ACK:{self.web_forwarder.last_ack_status})"
             )
         web_info = " ".join(web_parts)
+        ai_tag = ""
+        if ai_detection:
+            ai_tag = (
+                f" [AI:{ai_detection['status']}|RMSE:{ai_detection['rmse']:.2f}"
+                f"|Dom:{ai_detection['dominant_feature']}]"
+            )
 
         self.get_logger().info(
             f"[RX #{self.packet_count:04d}] [M{mannequin_id} {payload_mode}] "
             f"[{byte_len}B {pkt_label} {elapsed_ms:.0f}ms] "
-            f"[{self.last_rssi}dBm {self.last_snr}dB] [{valid_fields}/{NUM_PARAMS} valid] "
-            f"[{web_info}] -> {format_manekin_horizontal(sensor_dict)}"
+            f"[{self.last_rssi}dBm {self.last_snr}dB] [{valid_fields}/{NUM_PARAMS} valid]"
+            f"{ai_tag} [{web_info}] -> {format_manekin_horizontal(sensor_dict)}"
         )
 
     def check_frag_timeout(self) -> None:
