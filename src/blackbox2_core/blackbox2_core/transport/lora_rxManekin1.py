@@ -93,17 +93,14 @@ def _resolve_default_log_dir() -> str:
     if env_dir:
         return os.path.expanduser(env_dir)
 
-    default_ws_logs = os.path.expanduser("~/blackbox2_ws/logs/communication")
-    if os.path.isdir(os.path.expanduser("~/blackbox2_ws")):
-        return default_ws_logs
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.basename(script_dir) == "transport":
+        repo_root = os.path.abspath(os.path.join(script_dir, "..", "..", "..", ".."))
+        if os.path.isdir(os.path.join(repo_root, "src")):
+            return os.path.join(repo_root, "logs", "communication")
 
-    # Fallback ke <repo_root>/logs/communication jika dijalankan dari clone repo selain ~/blackbox2_ws
-    repo_root = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "..")
-    )
-    if os.path.isdir(os.path.join(repo_root, "src")):
-        return os.path.join(repo_root, "logs", "communication")
-    return default_ws_logs
+    # Standalone mode: simpan langsung di folder logs/communication sejajar dengan file rx ini
+    return os.path.join(script_dir, "logs", "communication")
 
 
 DEFAULT_LOG_DIR = _resolve_default_log_dir()
