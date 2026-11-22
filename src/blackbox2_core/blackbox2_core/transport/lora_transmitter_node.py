@@ -602,11 +602,11 @@ def valid_number(value):
 
 class LoRaTransmitterNode(Node):
 
-    def __init__(self):
+    def __init__(self, default_mannequin_id: int = 1):
 
         super().__init__("lora_transmitter_node")
 
-        self.declare_parameter("mannequin_id", 1)
+        self.declare_parameter("mannequin_id", int(default_mannequin_id))
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "packed")
         self.declare_parameter("log_enabled", True)
@@ -1896,7 +1896,7 @@ class LoRaTransmitterNode(Node):
 # MAIN
 # ============================================================
 
-def main(args=None):
+def main(args=None, default_mannequin_id: int = 1):
 
     rclpy.init(args=args)
 
@@ -1904,7 +1904,7 @@ def main(args=None):
 
     try:
 
-        node = LoRaTransmitterNode()
+        node = LoRaTransmitterNode(default_mannequin_id=default_mannequin_id)
 
         rclpy.spin(node)
 
