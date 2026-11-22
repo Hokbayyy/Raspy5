@@ -3,15 +3,19 @@
 
 import csv
 from datetime import datetime
+import getpass
 import json
 import math
 import os
 import random
+import re
+import socket
 import struct
 import time
 import threading
 import zlib
 from collections import deque
+from typing import Optional, Tuple
 
 import serial
 import rclpy
@@ -600,19 +604,78 @@ def valid_number(value):
 # LORA TRANSMITTER NODE
 # ============================================================
 
+_MANNEQUIN_NAME_RE = re.compile(
+    r"(?:manekin|mannequin|raspy|rpi)[_-]?([12])(?:\b|[^0-9])",
+    re.IGNORECASE,
+)
+
+
+def _resolve_auto_mannequin_id() -> Tuple[int, str]:
+    """Deteksi otomatis ID manekin (1/2) dari env, file lokal mesin, atau user/hostname Raspy."""
+    env_mid = os.environ.get("MANNEQUIN_ID", "").strip()
+    if env_mid.isdigit():
+        val = int(env_mid)
+        if 1 <= val <= 7:
+            return val, f"env:MANNEQUIN_ID={val}"
+
+    for id_path in (
+        os.path.expanduser("~/.mannequin_id"),
+        os.path.expanduser("~/blackbox2_ws/.mannequin_id"),
+        "/etc/mannequin_id",
+    ):
+        try:
+            if os.path.isfile(id_path):
+                raw = open(id_path, "r", encoding="utf-8").read().strip()
+                if raw.isdigit():
+                    val = int(raw)
+                    if 1 <= val <= 7:
+                        return val, f"file:{id_path}"
+        except Exception:
+            pass
+
+    candidates = []
+    try:
+        candidates.append(("host", socket.gethostname()))
+    except Exception:
+        pass
+    try:
+        candidates.append(("user", getpass.getuser()))
+    except Exception:
+        pass
+    home_name = os.path.basename(os.path.expanduser("~").rstrip("/\\"))
+    if home_name:
+        candidates.append(("home", home_name))
+
+    for kind, label in candidates:
+        m = _MANNEQUIN_NAME_RE.search(label or "")
+        if m:
+            return int(m.group(1)), f"{kind}:{label}"
+
+    return 1, "default"
+
+
 class LoRaTransmitterNode(Node):
 
-    def __init__(self, default_mannequin_id: int = 1):
+    def __init__(self, default_mannequin_id: Optional[int] = None):
 
         super().__init__("lora_transmitter_node")
 
-        self.declare_parameter("mannequin_id", int(default_mannequin_id))
+        if default_mannequin_id is not None:
+            auto_mid = int(default_mannequin_id)
+            mid_source = f"entrypoint:{auto_mid}"
+        else:
+            auto_mid, mid_source = _resolve_auto_mannequin_id()
+
+        self.declare_parameter("mannequin_id", auto_mid)
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "packed")
         self.declare_parameter("log_enabled", True)
         self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
 
         self.mannequin_id = int(self.get_parameter("mannequin_id").value)
+        if self.mannequin_id != auto_mid:
+            mid_source = f"ros_param:{self.mannequin_id}"
+        self._mannequin_id_source = mid_source
         self.boot_count = int(self.get_parameter("boot_count").value)
         self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
         self.log_enabled = bool(self.get_parameter("log_enabled").value)
@@ -751,6 +814,7 @@ class LoRaTransmitterNode(Node):
 
         self.get_logger().info(
             f"LoRa node initialized | "
+            f"mannequin_id={self.mannequin_id} ({self._mannequin_id_source}) | "
             f"Fields: {len(EXPECTED_KEYS)} | "
             f"Interval: {TRANSMIT_INTERVAL}s"
         )
@@ -1896,7 +1960,7 @@ class LoRaTransmitterNode(Node):
 # MAIN
 # ============================================================
 
-def main(args=None, default_mannequin_id: int = 1):
+def main(args=None, default_mannequin_id: Optional[int] = None):
 
     rclpy.init(args=args)
 
