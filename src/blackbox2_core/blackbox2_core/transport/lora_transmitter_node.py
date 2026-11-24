@@ -31,15 +31,17 @@ from std_msgs.msg import String
 SERIAL_PORT = "/dev/ttyAMA3"
 BAUD_RATE = 115200
 
-FREQUENCY = 923200000
+FREQUENCY = 922200000
 SPREADING_FACTOR = 9
 BANDWIDTH = 0
-CODING_RATE = 2
+CODING_RATE = 3
 PREAMBLE = 8
 TX_POWER = 22
+CAD_ENABLED = True
+CAD_MAX_RETRIES = 3
 
-# Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz & anti-tabrakan M1/M2
-TRANSMIT_INTERVAL = 2.0
+# Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz/CR4-8 & anti-tabrakan M1/M2
+TRANSMIT_INTERVAL = 2.5
 
 # Batas keras payload RAK3272S / RUI3 AT+PSEND = 239 byte (478 hex char).
 # TX wajib mengirim 1 uplink tunggal (<= 238 byte) tanpa dipecah fragmen FRG.
@@ -680,6 +682,8 @@ class LoRaTransmitterNode(Node):
         self.declare_parameter("mannequin_id", auto_mid)
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "packed")
+        self.declare_parameter("freq", FREQUENCY)
+        self.declare_parameter("cad_enabled", CAD_ENABLED)
         self.declare_parameter("transmit_interval", TRANSMIT_INTERVAL)
         self.declare_parameter("log_enabled", True)
         self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
@@ -690,6 +694,9 @@ class LoRaTransmitterNode(Node):
         self._mannequin_id_source = mid_source
         self.boot_count = int(self.get_parameter("boot_count").value)
         self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
+        self.freq = int(self.get_parameter("freq").value)
+        self.cad_enabled = bool(self.get_parameter("cad_enabled").value)
+        self.cad_active = False
         self.transmit_interval = max(
             0.2, float(self.get_parameter("transmit_interval").value)
         )
@@ -847,8 +854,8 @@ class LoRaTransmitterNode(Node):
         self.get_logger().info(
             f"LoRa node initialized | "
             f"mannequin_id={self.mannequin_id} ({self._mannequin_id_source}) | "
-            f"Freq:{FREQUENCY} SF{SPREADING_FACTOR} BW{BANDWIDTH} CR{CODING_RATE} Pwr:{TX_POWER}dBm | "
-            f"Fields: {len(EXPECTED_KEYS)} | "
+            f"Freq:{self.freq} SF{SPREADING_FACTOR} BW{BANDWIDTH} CR{CODING_RATE} Pwr:{TX_POWER}dBm | "
+            f"CAD:{self.cad_active} | Fields: {len(EXPECTED_KEYS)} | "
             f"Interval: {self.transmit_interval}s"
         )
 
@@ -986,7 +993,7 @@ class LoRaTransmitterNode(Node):
                     self.mannequin_id,
                     packet_type,
                     logged_mode,
-                    FREQUENCY,
+                    self.freq,
                     SPREADING_FACTOR,
                     BANDWIDTH,
                     CODING_RATE,
@@ -1116,7 +1123,7 @@ class LoRaTransmitterNode(Node):
             "AT+NWM=0",
             "AT+PRECV=0",
             (
-                f"AT+P2P={FREQUENCY}:"
+                f"AT+P2P={self.freq}:"
                 f"{SPREADING_FACTOR}:"
                 f"{BANDWIDTH}:"
                 f"{CODING_RATE}:"
@@ -1126,9 +1133,10 @@ class LoRaTransmitterNode(Node):
         ]
 
         self.rak_ready = False
+        self.cad_active = False
         self.get_logger().info(
             f"Configuring RAK P2P on {SERIAL_PORT} "
-            f"({FREQUENCY} Hz, SF{SPREADING_FACTOR}, BW{BANDWIDTH}, CR{CODING_RATE}, Pwr{TX_POWER})..."
+            f"({self.freq} Hz, SF{SPREADING_FACTOR}, BW{BANDWIDTH}, CR{CODING_RATE}, Pwr{TX_POWER})..."
         )
 
         for command in commands:
@@ -1148,7 +1156,7 @@ class LoRaTransmitterNode(Node):
                 bw_fallback = {0: 125, 1: 250, 2: 500}.get(BANDWIDTH)
                 if bw_fallback is not None:
                     fallback_cmd = (
-                        f"AT+P2P={FREQUENCY}:{SPREADING_FACTOR}:{bw_fallback}:"
+                        f"AT+P2P={self.freq}:{SPREADING_FACTOR}:{bw_fallback}:"
                         f"{CODING_RATE}:{PREAMBLE}:{TX_POWER}"
                     )
                     self.get_logger().warning(
@@ -1165,6 +1173,16 @@ class LoRaTransmitterNode(Node):
                 return False
 
             time.sleep(0.25)
+
+        if self.cad_enabled:
+            if self.send_at("AT+CAD=1", timeout=1.5):
+                self.cad_active = True
+                self.get_logger().info("CAD (Listen-Before-Talk) aktif: AT+CAD=1")
+            else:
+                self.cad_active = False
+                self.get_logger().warning(
+                    "AT+CAD=1 tidak didukung firmware modul; lanjut TX tanpa CAD."
+                )
 
         self.rak_ready = True
         self.get_logger().info(
@@ -1919,18 +1937,10 @@ class LoRaTransmitterNode(Node):
                 f"AT command: {len(command)} chars"
             )
 
-            self.serial_port.reset_input_buffer()
-
-            self.serial_port.write(
-                (command + "\r\n").encode("ascii")
-            )
-
-            self.serial_port.flush()
-
-            success = self.wait_tx_done(timeout=4.0)
+            tx_result = self._send_p2p_with_cad_retry(command)
             tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
-            if success:
+            if tx_result == "DONE":
 
                 self.transmitted_count += 1
 
@@ -1951,16 +1961,17 @@ class LoRaTransmitterNode(Node):
             else:
 
                 self.failed_count += 1
+                tx_status = "CAD_BUSY" if tx_result == "BUSY" else "FAILED"
 
                 self.write_local_tx_log(
                     fragment=fragment,
                     packet_type=packet_type,
-                    tx_status="FAILED",
+                    tx_status=tx_status,
                     tx_duration_ms=tx_duration_ms
                 )
 
                 self.get_logger().warning(
-                    f"TX failed: {self.failed_count}"
+                    f"TX failed ({tx_status}): {self.failed_count}"
                 )
 
         except Exception as error:
@@ -1983,11 +1994,32 @@ class LoRaTransmitterNode(Node):
 
             self.tx_active = False
 
+    def _send_p2p_with_cad_retry(self, command: str) -> str:
+        """Mengirim AT+PSEND dengan retry backoff singkat bila CAD mendeteksi channel sibuk."""
+        max_attempts = 1 + (CAD_MAX_RETRIES if self.cad_enabled else 0)
+        last_status = "ERROR"
+        for attempt in range(1, max_attempts + 1):
+            self.serial_port.reset_input_buffer()
+            self.serial_port.write((command + "\r\n").encode("ascii"))
+            self.serial_port.flush()
+
+            last_status = self.wait_tx_done(timeout=4.5)
+            if last_status != "BUSY" or attempt >= max_attempts:
+                return last_status
+
+            backoff_s = random.uniform(0.10, 0.25)
+            self.get_logger().warning(
+                f"CAD channel sibuk (AT_BUSY_ERROR); retry {attempt}/{CAD_MAX_RETRIES} "
+                f"dalam {backoff_s * 1000:.0f}ms"
+            )
+            time.sleep(backoff_s)
+        return last_status
+
     # ========================================================
     # WAIT TRANSMISSION CONFIRMATION
     # ========================================================
 
-    def wait_tx_done(self, timeout=4.0):
+    def wait_tx_done(self, timeout=4.5) -> str:
 
         start = time.monotonic()
 
@@ -2004,15 +2036,19 @@ class LoRaTransmitterNode(Node):
                 response += data.decode(
                     errors="ignore"
                 )
+                upper_resp = response.upper()
 
-                if "+EVT:TXP2P DONE" in response:
-                    return True
+                if "+EVT:TXP2P DONE" in upper_resp:
+                    return "DONE"
 
-                if "ERROR" in response:
+                if "AT_BUSY_ERROR" in upper_resp:
+                    return "BUSY"
+
+                if "ERROR" in upper_resp:
                     self.get_logger().error(
                         response.strip()
                     )
-                    return False
+                    return "ERROR"
 
             time.sleep(0.02)
 
@@ -2020,7 +2056,7 @@ class LoRaTransmitterNode(Node):
             f"TX confirmation timeout: {response.strip()}"
         )
 
-        return False
+        return "TIMEOUT"
 
     # ========================================================
     # SHUTDOWN

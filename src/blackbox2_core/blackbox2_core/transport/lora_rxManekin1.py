@@ -65,12 +65,34 @@ DEFAULT_SERIAL_PORT = "/dev/ttyAMA0"
 FALLBACK_PORTS = ("/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0")
 
 DEFAULT_BAUDRATE = 115200
-DEFAULT_FREQUENCY = 923200000
+DEFAULT_FREQUENCY = 922200000
 DEFAULT_SPREADING_FACTOR = 9
 DEFAULT_BANDWIDTH = 0
-DEFAULT_CODING_RATE = 2
+DEFAULT_CODING_RATE = 3
 DEFAULT_PREAMBLE = 8
 DEFAULT_TX_POWER = 22
+
+# Daftar kanal AS923 Indonesia (920.2 - 923.4 MHz) untuk fitur scan channel sepi (--scan-channels)
+AS923_SCAN_CHANNELS: Tuple[int, ...] = (
+    920200000,
+    920400000,
+    920600000,
+    920800000,
+    921000000,
+    921200000,
+    921400000,
+    921600000,
+    921800000,
+    922000000,
+    922200000,
+    922400000,
+    922600000,
+    922800000,
+    923000000,
+    923200000,
+    923400000,
+)
+CROWDED_LORAWAN_CHANNELS = frozenset({923200000, 923400000})
 
 # ============================================================
 # KONFIGURASI LOG LOKAL KOMUNIKASI LORA DI RASPBERRY PI
@@ -1762,11 +1784,26 @@ class RadioConfig:
     preamble: int = DEFAULT_PREAMBLE
     tx_power: int = DEFAULT_TX_POWER
 
-    def p2p_command(self, bw_override: Optional[int] = None) -> str:
+    def p2p_command(
+        self, bw_override: Optional[int] = None, freq_override: Optional[int] = None
+    ) -> str:
         bw = self.bw if bw_override is None else bw_override
+        freq = self.freq if freq_override is None else freq_override
         return (
-            f"AT+P2P={self.freq}:{self.sf}:{bw}:"
+            f"AT+P2P={freq}:{self.sf}:{bw}:"
             f"{self.cr}:{self.preamble}:{self.tx_power}"
+        )
+
+    def with_freq(self, freq: int) -> "RadioConfig":
+        return RadioConfig(
+            port=self.port,
+            baudrate=self.baudrate,
+            freq=freq,
+            sf=self.sf,
+            bw=self.bw,
+            cr=self.cr,
+            preamble=self.preamble,
+            tx_power=self.tx_power,
         )
 
 
@@ -2011,6 +2048,22 @@ class RakP2PReceiver:
             self.logger.error(f"AT command failed ({command}): {exc}")
             return False
 
+    def _apply_p2p_settings(self, freq_override: Optional[int] = None) -> bool:
+        if self.send_at(self.config.p2p_command(freq_override=freq_override), timeout=2.0):
+            return True
+        bw_fallback = {0: 125, 1: 250, 2: 500}.get(self.config.bw)
+        if bw_fallback is not None:
+            return self.send_at(
+                self.config.p2p_command(bw_override=bw_fallback, freq_override=freq_override),
+                timeout=2.0,
+            )
+        return False
+
+    def _start_rx_listen(self) -> None:
+        if not self.send_at("AT+PRECV=65534", timeout=2.0):
+            self.logger.info("Fallback AT+PRECV=65535...")
+            self.send_at("AT+PRECV=65535", timeout=2.0)
+
     def configure(self) -> None:
         if not self.is_connected:
             return
@@ -2019,17 +2072,65 @@ class RakP2PReceiver:
         self.send_at("AT", timeout=1.0)
         self._ensure_p2p_mode()
         self.send_at("AT+PRECV=0", timeout=1.0)
-
-        if not self.send_at(self.config.p2p_command(), timeout=2.0):
-            bw_fallback = {0: 125, 1: 250, 2: 500}.get(self.config.bw)
-            if bw_fallback is not None:
-                self.send_at(self.config.p2p_command(bw_override=bw_fallback), timeout=2.0)
-
-        if not self.send_at("AT+PRECV=65534", timeout=2.0):
-            self.logger.info("Fallback AT+PRECV=65535...")
-            self.send_at("AT+PRECV=65535", timeout=2.0)
-
+        self._apply_p2p_settings()
+        self._start_rx_listen()
         self.logger.info("RAK Receiver configuration sequence completed.")
+
+    def scan_quiet_channel(
+        self,
+        dwell_sec: float = 1.5,
+        channels: Tuple[int, ...] = AS923_SCAN_CHANNELS,
+    ) -> int:
+        """Memindai daftar kanal AS923 saat TX mati untuk mencari frekuensi paling sepi."""
+        if not self.is_connected or not channels:
+            return self.config.freq
+
+        dwell = max(0.4, float(dwell_sec))
+        self.logger.info(
+            f"[SCAN] Memulai pemindaian {len(channels)} kanal ({dwell:.1f}s/kanal; "
+            "pastikan TX manekin mati saat scan)..."
+        )
+        results: List[Tuple[int, int, int]] = []
+        for freq in channels:
+            self.send_at("AT+PRECV=0", timeout=1.0)
+            self._apply_p2p_settings(freq_override=freq)
+            self._rx_buffer = ""
+            self._start_rx_listen()
+
+            pkt_cnt = 0
+            err_cnt = 0
+            deadline = time.monotonic() + dwell
+            while time.monotonic() < deadline:
+                for line in self.read_lines():
+                    if parse_rx_event(line) is not None:
+                        pkt_cnt += 1
+                    elif "RXP2P" in line.upper() and "ERROR" in line.upper():
+                        err_cnt += 1
+                time.sleep(0.02)
+
+            self.logger.info(
+                f"[SCAN] {freq / 1e6:6.2f} MHz ({freq}): pkt={pkt_cnt}, hw_err={err_cnt}"
+            )
+            results.append((freq, pkt_cnt, err_cnt))
+
+        def _score(item: Tuple[int, int, int]) -> Tuple[int, int, int, int]:
+            freq, pkt_cnt, err_cnt = item
+            return (
+                pkt_cnt + err_cnt,
+                1 if freq in CROWDED_LORAWAN_CHANNELS else 0,
+                0 if freq == self.config.freq else 1,
+                abs(freq - DEFAULT_FREQUENCY),
+            )
+
+        best_freq, best_pkt, best_err = min(results, key=_score)
+        self.config = self.config.with_freq(best_freq)
+        self.configure()
+        self.logger.info(
+            f"[SCAN] Selesai {len(results)} kanal | Frekuensi paling sepi: "
+            f"{best_freq} Hz ({best_freq / 1e6:.2f} MHz) [pkt={best_pkt}, hw_err={best_err}] | "
+            f"Set TX dengan: -p freq:={best_freq}"
+        )
+        return best_freq
 
     def _ensure_p2p_mode(self) -> None:
         self.serial_port.reset_input_buffer()
@@ -2543,12 +2644,19 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         self.declare_parameter("boot_count", 0)
         self.declare_parameter("log_enabled", DEFAULT_LOG_ENABLED)
         self.declare_parameter("log_dir", DEFAULT_LOG_DIR)
+        self.declare_parameter("scan_channels", False)
+        self.declare_parameter("scan_only", False)
+        self.declare_parameter("scan_dwell_sec", 1.5)
 
         frag_timeout = float(self.get_parameter("frag_timeout").value)
         self.default_mannequin_id = int(self.get_parameter("mannequin_id").value)
         configured_boot = int(self.get_parameter("boot_count").value)
         log_enabled = bool(self.get_parameter("log_enabled").value)
         log_dir = str(self.get_parameter("log_dir").value)
+        scan_channels = bool(self.get_parameter("scan_channels").value)
+        scan_only = bool(self.get_parameter("scan_only").value)
+        scan_dwell_sec = float(self.get_parameter("scan_dwell_sec").value)
+        self._scan_only_done = False
         self.boot_count = (
             configured_boot
             if configured_boot > 0
@@ -2585,7 +2693,12 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             fallback_ports=FALLBACK_PORTS,
             logger=self.get_logger(),
         )
-        self.radio.connect()
+        connected = self.radio.connect()
+        if connected and (scan_channels or scan_only):
+            self.radio.scan_quiet_channel(dwell_sec=scan_dwell_sec)
+            self.radio_config = self.radio.config
+            if scan_only:
+                self._scan_only_done = True
 
         key_state = "SET" if web_config.ingest_api_key else "EMPTY"
         mqtt_pass_state = "SET" if web_config.mqtt_password else "EMPTY"
@@ -3132,6 +3245,8 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             )
 
     def run(self) -> None:
+        if self._scan_only_done:
+            return
         next_frag_check = time.monotonic() + 0.5
         while not self._stop_event.is_set():
             self.read_serial_data()
@@ -3174,15 +3289,23 @@ def parse_cli_args(argv: Optional[List[str]] = None) -> Tuple[str, Dict[str, str
             continue
         if arg.startswith("--"):
             key_raw = arg[2:]
+            norm_key = key_raw.strip().replace("-", "_")
             if "=" in key_raw:
                 k, v = key_raw.split("=", 1)
                 overrides[k.strip().replace("-", "_")] = v.strip()
                 i += 1
+            elif norm_key in ("scan_channels", "scan_only") and (
+                i + 1 >= len(args)
+                or args[i + 1].strip().lower()
+                not in ("true", "false", "1", "0", "yes", "no", "on", "off")
+            ):
+                overrides[norm_key] = "true"
+                i += 1
             elif i + 1 < len(args):
-                overrides[key_raw.strip().replace("-", "_")] = args[i + 1].strip()
+                overrides[norm_key] = args[i + 1].strip()
                 i += 2
             else:
-                overrides[key_raw.strip().replace("-", "_")] = "true"
+                overrides[norm_key] = "true"
                 i += 1
             continue
         if arg.startswith("/dev/") or arg.upper().startswith("COM"):
