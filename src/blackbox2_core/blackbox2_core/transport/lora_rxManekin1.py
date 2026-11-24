@@ -65,14 +65,14 @@ DEFAULT_SERIAL_PORT = "/dev/ttyAMA0"
 FALLBACK_PORTS = ("/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0")
 
 DEFAULT_BAUDRATE = 115200
-DEFAULT_FREQUENCY = 922200000
+DEFAULT_FREQUENCY = 920600000
 DEFAULT_SPREADING_FACTOR = 9
 DEFAULT_BANDWIDTH = 0
 DEFAULT_CODING_RATE = 3
 DEFAULT_PREAMBLE = 8
 DEFAULT_TX_POWER = 22
 
-# Daftar kanal AS923 Indonesia (920.2 - 923.4 MHz) untuk fitur scan channel sepi (--scan-channels)
+# Daftar kanal aman dalam regulasi Indonesia 920-923 MHz (dengan guard band dari 920.0 & 923.0 MHz)
 AS923_SCAN_CHANNELS: Tuple[int, ...] = (
     920200000,
     920400000,
@@ -88,11 +88,18 @@ AS923_SCAN_CHANNELS: Tuple[int, ...] = (
     922400000,
     922600000,
     922800000,
-    923000000,
-    923200000,
-    923400000,
 )
-CROWDED_LORAWAN_CHANNELS = frozenset({923200000, 923400000})
+# 8 kanal utama gateway publik AS923-2 Indonesia (921.2 - 922.6 MHz)
+CROWDED_LORAWAN_CHANNELS = frozenset({
+    921200000,
+    921400000,
+    921600000,
+    921800000,
+    922000000,
+    922200000,
+    922400000,
+    922600000,
+})
 
 # ============================================================
 # KONFIGURASI LOG LOKAL KOMUNIKASI LORA DI RASPBERRY PI
