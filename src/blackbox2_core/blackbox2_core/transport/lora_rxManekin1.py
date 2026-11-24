@@ -163,8 +163,16 @@ DEFAULT_MQTT_ALERTS_ENABLED = (
     in ("1", "true", "yes", "on")
 )
 
-DEFAULT_DEVICE_ID_M1 = "AD8121DAD12451E2"
-DEFAULT_DEVICE_ID_M2 = "AD8121DAD12451E1"
+DEFAULT_DEVICE_ID_M1 = (
+    os.environ.get("WEB_DEVICE_ID_M1", "").strip() or "AD8121DAD12451E2"
+)
+DEFAULT_DEVICE_ID_M2 = (
+    os.environ.get("WEB_DEVICE_ID_M2", "").strip() or "AD8121DAD12451E1"
+)
+DEFAULT_AI_WEB_ENABLED = (
+    os.environ.get("WEB_AI_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 
 DEFAULT_HTTP_ENABLED = (
     os.environ.get("WEB_HTTP_ENABLED", "false").strip().lower()
@@ -498,6 +506,7 @@ COMMUNICATION_CSV_HEADER: List[str] = [
     "ai_status",
     "ai_dominant_feature",
     "ai_rmse",
+    "web_device_id",
 ]
 
 TELEMETRY_CSV_HEADER: List[str] = [
@@ -620,6 +629,7 @@ class LocalCommunicationLogger:
         web_ack_status: str,
         web_http_sent: int,
         ai_detection: Optional[Dict[str, object]] = None,
+        web_device_id: str = "",
     ) -> None:
         if not self.enabled or self._comm_writer is None:
             return
@@ -658,6 +668,7 @@ class LocalCommunicationLogger:
             ai_status,
             ai_dom,
             ai_rmse,
+            web_device_id,
         ]
         with self._lock:
             try:
@@ -1079,6 +1090,9 @@ class WebForwarderConfig:
     mqtt_client_id: str = DEFAULT_MQTT_CLIENT_ID
     mqtt_alerts_enabled: bool = DEFAULT_MQTT_ALERTS_ENABLED
     device_id: str = ""
+    device_id_m1: str = DEFAULT_DEVICE_ID_M1
+    device_id_m2: str = DEFAULT_DEVICE_ID_M2
+    ai_web_enabled: bool = DEFAULT_AI_WEB_ENABLED
     http_enabled: bool = DEFAULT_HTTP_ENABLED
     http_base_url: str = DEFAULT_HTTP_BASE_URL
     ingest_api_key: str = DEFAULT_INGEST_API_KEY
@@ -1089,9 +1103,32 @@ class WebForwarderConfig:
         return "mqtts" if self.mqtt_tls else "mqtt"
 
     def resolve_device_id(self, mannequin_id: int) -> str:
+        if mannequin_id == 1:
+            return self.device_id_m1.strip() or DEFAULT_DEVICE_ID_M1
+        if mannequin_id == 2:
+            return self.device_id_m2.strip() or DEFAULT_DEVICE_ID_M2
         if self.device_id.strip():
             return self.device_id.strip()
-        return DEFAULT_DEVICE_ID_M2 if mannequin_id == 2 else DEFAULT_DEVICE_ID_M1
+        return self.device_id_m1.strip() or DEFAULT_DEVICE_ID_M1
+
+    def mannequin_label_for_device(self, device_id: str) -> str:
+        norm = (device_id or "").strip()
+        if norm == (self.device_id_m1.strip() or DEFAULT_DEVICE_ID_M1):
+            return "M1"
+        if norm == (self.device_id_m2.strip() or DEFAULT_DEVICE_ID_M2):
+            return "M2"
+        return "-"
+
+    def ack_topics(self) -> Tuple[str, ...]:
+        seen: List[str] = []
+        for dev in (
+            self.device_id_m1.strip() or DEFAULT_DEVICE_ID_M1,
+            self.device_id_m2.strip() or DEFAULT_DEVICE_ID_M2,
+        ):
+            topic = f"smart-mannequin/{dev}/ack"
+            if topic not in seen:
+                seen.append(topic)
+        return tuple(seen)
 
 
 class WebTelemetryForwarder:
@@ -1115,6 +1152,8 @@ class WebTelemetryForwarder:
         self.http_sent_count = 0
         self.http_fail_count = 0
         self.last_ack_status = "-"
+        self._stats_lock = threading.Lock()
+        self._stats_by_dev: Dict[str, Dict[str, object]] = {}
 
         self._paho_client = None
         self._paho_connected = False
@@ -1141,6 +1180,26 @@ class WebTelemetryForwarder:
             target=self._worker_loop, name="web_telemetry_forwarder", daemon=True
         )
         self._worker.start()
+
+    def _dev_stats_unlocked(self, device_id: str) -> Dict[str, object]:
+        st = self._stats_by_dev.get(device_id)
+        if st is None:
+            st = {
+                "device_id": device_id,
+                "mqtt_sent": 0,
+                "mqtt_fail": 0,
+                "mqtt_ack": 0,
+                "last_ack": "-",
+                "http_sent": 0,
+                "http_fail": 0,
+            }
+            self._stats_by_dev[device_id] = st
+        return st
+
+    def get_stats(self, mannequin_id: int) -> Dict[str, object]:
+        device_id = self.config.resolve_device_id(mannequin_id)
+        with self._stats_lock:
+            return dict(self._dev_stats_unlocked(device_id))
 
     def _init_mqtt(self) -> None:
         client_id = (self.config.mqtt_client_id or "").strip() or "manekin-rx-01"
@@ -1206,6 +1265,7 @@ class WebTelemetryForwarder:
             use_tls=self.config.mqtt_tls,
             ca_certs=self.config.mqtt_ca_certs,
             on_message=self._handle_ack_message,
+            subscribe_topics=self.config.ack_topics(),
         )
         self.logger.info(
             f"Web MQTT client (built-in socket) siap -> "
@@ -1220,11 +1280,13 @@ class WebTelemetryForwarder:
             self._paho_connected = True
             self._last_mqtt_error = ""
             self._paho_connect_event.set()
-            client.subscribe("smart-mannequin/+/ack", qos=1)
+            ack_topics = self.config.ack_topics()
+            for ack_topic in ack_topics:
+                client.subscribe(ack_topic, qos=1)
             self.logger.info(
                 f"Terhubung ke Web MQTT Broker "
                 f"({self.config.effective_mqtt_scheme()}://{self.config.mqtt_host}:{self.config.mqtt_port}) "
-                f"[client_id={self.config.mqtt_client_id}] & subscribe smart-mannequin/+/ack"
+                f"[client_id={self.config.mqtt_client_id}] & subscribe {', '.join(ack_topics)}"
             )
         else:
             self._paho_connected = False
@@ -1247,17 +1309,28 @@ class WebTelemetryForwarder:
                 self.mqtt_ack_count += 1
                 status = str(ack.get("status", "UNKNOWN"))
                 self.last_ack_status = status
-                dev_id = ack.get("deviceIdentifier", "-")
+                dev_id = str(ack.get("deviceIdentifier") or "").strip()
+                if not dev_id and _topic:
+                    topic_parts = [p for p in str(_topic).split("/") if p]
+                    if len(topic_parts) >= 3 and topic_parts[-1] == "ack":
+                        dev_id = topic_parts[-2]
+                if not dev_id:
+                    dev_id = "-"
+                mannequin_lbl = self.config.mannequin_label_for_device(dev_id)
+                with self._stats_lock:
+                    st = self._dev_stats_unlocked(dev_id)
+                    st["mqtt_ack"] = int(st["mqtt_ack"]) + 1
+                    st["last_ack"] = status
                 seq = ack.get("s", "-")
                 readings_cnt = ack.get("readingsCount", 0)
                 if status == "REJECTED":
                     err_code = ack.get("errorCode", "UNKNOWN_ERROR")
                     self.logger.error(
-                        f"[WEB-ACK REJECTED] dev={dev_id} s={seq} errorCode={err_code}"
+                        f"[WEB-ACK REJECTED] [{mannequin_lbl}] dev={dev_id} s={seq} errorCode={err_code}"
                     )
                 else:
                     self.logger.info(
-                        f"[WEB-ACK #{self.mqtt_ack_count:04d}] dev={dev_id} s={seq} "
+                        f"[WEB-ACK #{self.mqtt_ack_count:04d}] [{mannequin_lbl}] dev={dev_id} s={seq} "
                         f"status={status} readings={readings_cnt}"
                     )
         except Exception:
@@ -1338,10 +1411,17 @@ class WebTelemetryForwarder:
         topic = f"smart-mannequin/{device_id}/telemetry"
         payload_str = json.dumps(wire_obj, separators=(",", ":"), allow_nan=False)
 
-        if self._publish_mqtt_raw(topic, payload_str):
+        ok = self._publish_mqtt_raw(topic, payload_str)
+        if ok:
             self.mqtt_sent_count += 1
         else:
             self.mqtt_fail_count += 1
+        with self._stats_lock:
+            st = self._dev_stats_unlocked(device_id)
+            if ok:
+                st["mqtt_sent"] = int(st["mqtt_sent"]) + 1
+            else:
+                st["mqtt_fail"] = int(st["mqtt_fail"]) + 1
 
     def _send_mqtt_alert(
         self, device_id: str, alert_payload: Dict[str, object]
@@ -1546,7 +1626,7 @@ class WebTelemetryForwarder:
 
         if self.config.http_legacy_endpoints:
             if d.get("lidar_raw") is not None or d.get("lidar_median") is not None:
-                lidar_body: Dict[str, object] = {"sensor_id": 901}
+                lidar_body: Dict[str, object] = {"sensor_id": 901, "mannequin_id": mannequin_id}
                 if d.get("lidar_raw") is not None:
                     lidar_body["value"] = d["lidar_raw"]
                 if d.get("lidar_median") is not None:
@@ -1554,7 +1634,7 @@ class WebTelemetryForwarder:
                 endpoints.append(("/sensor/lidar", lidar_body))
 
             if any(d.get(k) is not None for k in ("mq_co", "mq_co2", "smoke", "mq_nh3")):
-                mq_body: Dict[str, object] = {"sensor_id": 101}
+                mq_body: Dict[str, object] = {"sensor_id": 101, "mannequin_id": mannequin_id}
                 if d.get("mq_nh3") is not None:
                     mq_body["value"] = d["mq_nh3"]
                 if d.get("mq_co") is not None:
@@ -1576,7 +1656,7 @@ class WebTelemetryForwarder:
                     "adxl_acc_z_kalman",
                 )
             ):
-                adxl_body: Dict[str, object] = {"sensor_id": 201}
+                adxl_body: Dict[str, object] = {"sensor_id": 201, "mannequin_id": mannequin_id}
                 for src_k, dst_k in (
                     ("adxl_acc_x_raw", "x"),
                     ("adxl_acc_y_raw", "y"),
@@ -1590,7 +1670,7 @@ class WebTelemetryForwarder:
                 endpoints.append(("/sensor/adxl", adxl_body))
 
             if any(d.get(k) is not None for k in ("bme_temp", "bme_pres", "bme_hum")):
-                bme_body: Dict[str, object] = {}
+                bme_body: Dict[str, object] = {"mannequin_id": mannequin_id}
                 if d.get("bme_temp") is not None:
                     bme_body["temperature"] = d["bme_temp"]
                 if d.get("bme_pres") is not None:
@@ -1603,11 +1683,11 @@ class WebTelemetryForwarder:
                 if d.get(lc_key) is not None:
                     endpoints.append((
                         "/sensor/loadcell",
-                        {"sensor_id": lc_id, "value": d[lc_key]},
+                        {"sensor_id": lc_id, "value": d[lc_key], "mannequin_id": mannequin_id},
                     ))
 
             if any(d.get(k) is not None for k in ("roll", "pitch", "yaw")):
-                wit_body: Dict[str, object] = {}
+                wit_body: Dict[str, object] = {"mannequin_id": mannequin_id}
                 if d.get("roll") is not None:
                     wit_body["x_angle"] = d["roll"]
                 if d.get("pitch") is not None:
@@ -1638,10 +1718,17 @@ class WebTelemetryForwarder:
             if auth_blocked:
                 break
 
+        device_id = self.config.resolve_device_id(mannequin_id)
         if ok_any:
             self.http_sent_count += 1
         else:
             self.http_fail_count += 1
+        with self._stats_lock:
+            st = self._dev_stats_unlocked(device_id)
+            if ok_any:
+                st["http_sent"] = int(st["http_sent"]) + 1
+            else:
+                st["http_fail"] = int(st["http_fail"]) + 1
 
     def close(self) -> None:
         self._running = False
@@ -1779,6 +1866,9 @@ def declare_web_config(node: StandaloneParamStore) -> WebForwarderConfig:
     node.declare_parameter("mqtt_client_id", DEFAULT_MQTT_CLIENT_ID)
     node.declare_parameter("mqtt_alerts_enabled", DEFAULT_MQTT_ALERTS_ENABLED)
     node.declare_parameter("device_id", "")
+    node.declare_parameter("device_id_m1", DEFAULT_DEVICE_ID_M1)
+    node.declare_parameter("device_id_m2", DEFAULT_DEVICE_ID_M2)
+    node.declare_parameter("ai_web_enabled", DEFAULT_AI_WEB_ENABLED)
     node.declare_parameter("http_enabled", DEFAULT_HTTP_ENABLED)
     node.declare_parameter("http_base_url", DEFAULT_HTTP_BASE_URL)
     node.declare_parameter("ingest_api_key", DEFAULT_INGEST_API_KEY)
@@ -1825,6 +1915,9 @@ def declare_web_config(node: StandaloneParamStore) -> WebForwarderConfig:
         mqtt_client_id=str(node.get_parameter("mqtt_client_id").value).strip() or "manekin-rx-01",
         mqtt_alerts_enabled=bool(node.get_parameter("mqtt_alerts_enabled").value),
         device_id=str(node.get_parameter("device_id").value),
+        device_id_m1=str(node.get_parameter("device_id_m1").value),
+        device_id_m2=str(node.get_parameter("device_id_m2").value),
+        ai_web_enabled=bool(node.get_parameter("ai_web_enabled").value),
         http_enabled=bool(node.get_parameter("http_enabled").value),
         http_base_url=str(node.get_parameter("http_base_url").value),
         ingest_api_key=str(node.get_parameter("ingest_api_key").value),
@@ -2340,13 +2433,19 @@ def build_web_v2_payload(
     mannequin_id: int,
     boot_count: int,
     seq: int,
+    ai_detection: Optional[Dict[str, object]] = None,
+    include_ai: bool = False,
 ) -> Dict[str, object]:
     id_offset = 1000 if mannequin_id == 2 else 0
-    readings = [
+    readings: List[List[object]] = [
         [base_id + id_offset, sensor_dict.get(key)]
         for key, base_id in WEB_READING_ID_MAP_M1.items()
         if (base_id + id_offset) not in UNBOUND_WEB_READING_IDS
     ]
+    if include_ai and ai_detection is not None:
+        readings.append([1112 + id_offset, 1 if ai_detection.get("is_anomaly") else 0])
+        readings.append([1113 + id_offset, int(ai_detection.get("dominant_idx", 31))])
+        readings.append([1114 + id_offset, float(ai_detection.get("rmse", 0.0))])
     return {
         "v": 2,
         "b": boot_count,
@@ -2497,6 +2596,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             f"WebMQTT:{web_config.mqtt_enabled} ({mqtt_scheme}://{web_config.mqtt_host}:{web_config.mqtt_port}, "
             f"tls={web_config.mqtt_tls}, client_id={web_config.mqtt_client_id}, "
             f"user={web_config.mqtt_username or '-'}, pass={mqtt_pass_state}, qos=1, retain=False) | "
+            f"WebRoutes:[M1->{web_config.device_id_m1}, M2->{web_config.device_id_m2}, AI_Web={web_config.ai_web_enabled}] | "
             f"WebHTTP:{web_config.http_enabled} ({web_config.http_base_url}, key={key_state})"
         )
 
@@ -2535,9 +2635,11 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         crc_hex: str = "NONE",
         valid_fields: int = 0,
     ) -> None:
+        target_mid = self.default_mannequin_id if mannequin_id is None else mannequin_id
+        dev_stats = self.web_forwarder.get_stats(target_mid)
         self.comm_logger.log_communication(
             packet_no=self.packet_count,
-            mannequin_id=self.default_mannequin_id if mannequin_id is None else mannequin_id,
+            mannequin_id=target_mid,
             packet_type=packet_type,
             payload_mode=payload_mode,
             rssi=self.last_rssi,
@@ -2554,9 +2656,10 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             frag_timeouts_total=self.frag_timeout_count,
             valid_fields=valid_fields,
             total_fields=NUM_PARAMS,
-            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-            web_ack_status=self.web_forwarder.last_ack_status,
-            web_http_sent=self.web_forwarder.http_sent_count,
+            web_device_id=str(dev_stats["device_id"]),
+            web_mqtt_sent=int(dev_stats["mqtt_sent"]),
+            web_ack_status=str(dev_stats["last_ack"]),
+            web_http_sent=int(dev_stats["http_sent"]),
         )
 
     def read_serial_data(self) -> None:
@@ -2638,28 +2741,14 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                 )
             except ValueError as exc:
                 self.crc_error_count += 1
-                self.comm_logger.log_communication(
-                    packet_no=self.packet_count,
-                    mannequin_id=self.default_mannequin_id,
+                self._log_comm_event(
                     packet_type="crc_error",
                     payload_mode="invalid_pressed_crc",
-                    rssi=self.last_rssi,
-                    snr=self.last_snr,
-                    radio_cfg=self.radio_config,
                     byte_len=len(complete_data),
                     fragments=total_frags,
                     reassembly_ms=elapsed_ms,
-                    inter_packet_ms=None,
-                    packet_rate_hz=None,
                     crc_status="CRC_ERROR",
                     crc_hex="MISMATCH",
-                    crc_errors_total=self.crc_error_count,
-                    frag_timeouts_total=self.frag_timeout_count,
-                    valid_fields=0,
-                    total_fields=NUM_PARAMS,
-                    web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-                    web_ack_status=self.web_forwarder.last_ack_status,
-                    web_http_sent=self.web_forwarder.http_sent_count,
                 )
                 self.get_logger().warning(
                     f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
@@ -2686,28 +2775,14 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             payload_bytes, crc_hex = split_and_verify_crc(complete_data)
         except ValueError as exc:
             self.crc_error_count += 1
-            self.comm_logger.log_communication(
-                packet_no=self.packet_count,
-                mannequin_id=self.default_mannequin_id,
+            self._log_comm_event(
                 packet_type="crc_error",
                 payload_mode="invalid_crc",
-                rssi=self.last_rssi,
-                snr=self.last_snr,
-                radio_cfg=self.radio_config,
                 byte_len=len(complete_data),
                 fragments=total_frags,
                 reassembly_ms=elapsed_ms,
-                inter_packet_ms=None,
-                packet_rate_hz=None,
                 crc_status="CRC_ERROR",
                 crc_hex="MISMATCH",
-                crc_errors_total=self.crc_error_count,
-                frag_timeouts_total=self.frag_timeout_count,
-                valid_fields=0,
-                total_fields=NUM_PARAMS,
-                web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-                web_ack_status=self.web_forwarder.last_ack_status,
-                web_http_sent=self.web_forwarder.http_sent_count,
             )
             self.get_logger().warning(
                 f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
@@ -2793,14 +2868,10 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         self.web_forwarder.enqueue_alert(alert_mid, alert_payload)
 
         # Simpan ke CSV komunikasi & CSV alert lokal
-        self.comm_logger.log_communication(
-            packet_no=self.packet_count,
+        self._log_comm_event(
             mannequin_id=alert_mid,
             packet_type="alert",
             payload_mode="alert",
-            rssi=self.last_rssi,
-            snr=self.last_snr,
-            radio_cfg=self.radio_config,
             byte_len=byte_len,
             fragments=total_frags,
             reassembly_ms=elapsed_ms,
@@ -2808,13 +2879,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             packet_rate_hz=rate_hz,
             crc_status="OK",
             crc_hex=crc_hex,
-            crc_errors_total=self.crc_error_count,
-            frag_timeouts_total=self.frag_timeout_count,
             valid_fields=0,
-            total_fields=NUM_PARAMS,
-            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-            web_ack_status=self.web_forwarder.last_ack_status,
-            web_http_sent=self.web_forwarder.http_sent_count,
         )
         self.comm_logger.log_alert(
             packet_no=self.packet_count,
@@ -2941,6 +3006,8 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                 mannequin_id=mannequin_id,
                 boot_count=self.boot_count,
                 seq=next_seq,
+                ai_detection=ai_detection,
+                include_ai=self.web_forwarder.config.ai_web_enabled,
             )
 
         # 1. KIRIM LANGSUNG KE WEB BACKEND (MQTT Compact V2 & HTTP REST)
@@ -2949,6 +3016,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             web_v2_obj=web_v2_obj,
             sensor_dict=sensor_dict,
         )
+        dev_stats = self.web_forwarder.get_stats(mannequin_id)
 
         # 2. SIMPAN LOKAL DI RASPBERRY PI (<folder_script>/logs/communication/)
         self.comm_logger.log_communication(
@@ -2970,9 +3038,10 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
             frag_timeouts_total=self.frag_timeout_count,
             valid_fields=valid_fields,
             total_fields=NUM_PARAMS,
-            web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-            web_ack_status=self.web_forwarder.last_ack_status,
-            web_http_sent=self.web_forwarder.http_sent_count,
+            web_device_id=str(dev_stats["device_id"]),
+            web_mqtt_sent=int(dev_stats["mqtt_sent"]),
+            web_ack_status=str(dev_stats["last_ack"]),
+            web_http_sent=int(dev_stats["http_sent"]),
             ai_detection=ai_detection,
         )
         self.comm_logger.log_telemetry(
@@ -2995,13 +3064,13 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         web_parts = []
         if self.web_forwarder.config.http_enabled:
             web_parts.append(
-                f"HTTP:{self.web_forwarder.http_sent_count}"
-                f"(fail:{self.web_forwarder.http_fail_count})"
+                f"HTTP:{dev_stats['http_sent']}"
+                f"(fail:{dev_stats['http_fail']})"
             )
         if self.web_forwarder.config.mqtt_enabled or not web_parts:
             web_parts.append(
-                f"MQTT:{self.web_forwarder.mqtt_sent_count}"
-                f"(fail:{self.web_forwarder.mqtt_fail_count},ACK:{self.web_forwarder.last_ack_status})"
+                f"MQTT:{dev_stats['device_id']}:{dev_stats['mqtt_sent']}"
+                f"(fail:{dev_stats['mqtt_fail']},ACK:{dev_stats['last_ack']})"
             )
         web_info = " ".join(web_parts)
         ai_tag = ""
@@ -3023,28 +3092,14 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         if dropped is not None:
             received, total = dropped
             self.frag_timeout_count += 1
-            self.comm_logger.log_communication(
-                packet_no=self.packet_count,
-                mannequin_id=self.default_mannequin_id,
+            self._log_comm_event(
                 packet_type="frag_timeout",
                 payload_mode=f"incomplete_{received}_of_{total}",
-                rssi=self.last_rssi,
-                snr=self.last_snr,
-                radio_cfg=self.radio_config,
                 byte_len=0,
                 fragments=received,
                 reassembly_ms=self.assembler.timeout_sec * 1000.0,
-                inter_packet_ms=None,
-                packet_rate_hz=None,
                 crc_status="FRAG_TIMEOUT",
                 crc_hex="NONE",
-                crc_errors_total=self.crc_error_count,
-                frag_timeouts_total=self.frag_timeout_count,
-                valid_fields=0,
-                total_fields=NUM_PARAMS,
-                web_mqtt_sent=self.web_forwarder.mqtt_sent_count,
-                web_ack_status=self.web_forwarder.last_ack_status,
-                web_http_sent=self.web_forwarder.http_sent_count,
             )
             self.get_logger().warning(
                 f"Fragmen tidak lengkap dalam {self.assembler.timeout_sec}s "
