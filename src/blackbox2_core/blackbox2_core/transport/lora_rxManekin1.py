@@ -66,11 +66,11 @@ FALLBACK_PORTS = ("/dev/ttyAMA0", "/dev/serial0", "/dev/ttyAMA3", "/dev/ttyUSB0"
 
 DEFAULT_BAUDRATE = 115200
 DEFAULT_FREQUENCY = 923200000
-DEFAULT_SPREADING_FACTOR = 6
-DEFAULT_BANDWIDTH = 2
-DEFAULT_CODING_RATE = 0
+DEFAULT_SPREADING_FACTOR = 9
+DEFAULT_BANDWIDTH = 0
+DEFAULT_CODING_RATE = 2
 DEFAULT_PREAMBLE = 8
-DEFAULT_TX_POWER = 20
+DEFAULT_TX_POWER = 22
 
 # ============================================================
 # KONFIGURASI LOG LOKAL KOMUNIKASI LORA DI RASPBERRY PI
@@ -2020,8 +2020,10 @@ class RakP2PReceiver:
         self._ensure_p2p_mode()
         self.send_at("AT+PRECV=0", timeout=1.0)
 
-        if not self.send_at(self.config.p2p_command(), timeout=2.0) and self.config.bw == 2:
-            self.send_at(self.config.p2p_command(bw_override=500), timeout=2.0)
+        if not self.send_at(self.config.p2p_command(), timeout=2.0):
+            bw_fallback = {0: 125, 1: 250, 2: 500}.get(self.config.bw)
+            if bw_fallback is not None:
+                self.send_at(self.config.p2p_command(bw_override=bw_fallback), timeout=2.0)
 
         if not self.send_at("AT+PRECV=65534", timeout=2.0):
             self.logger.info("Fallback AT+PRECV=65535...")

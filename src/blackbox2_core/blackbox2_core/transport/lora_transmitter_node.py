@@ -32,14 +32,14 @@ SERIAL_PORT = "/dev/ttyAMA3"
 BAUD_RATE = 115200
 
 FREQUENCY = 923200000
-SPREADING_FACTOR = 7
+SPREADING_FACTOR = 9
 BANDWIDTH = 0
-CODING_RATE = 0
+CODING_RATE = 2
 PREAMBLE = 8
 TX_POWER = 22
 
-# Kirim satu paket setiap 1 detik
-TRANSMIT_INTERVAL = 0
+# Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz & anti-tabrakan M1/M2
+TRANSMIT_INTERVAL = 2.0
 
 # Batas keras payload RAK3272S / RUI3 AT+PSEND = 239 byte (478 hex char).
 # TX wajib mengirim 1 uplink tunggal (<= 238 byte) tanpa dipecah fragmen FRG.
@@ -51,8 +51,8 @@ MAX_PAYLOAD = MAX_SINGLE_LORA_PAYLOAD
 # Tidak pernah membuat nilai dummy.
 HOLD_LAST_VALUE = True
 
-# Maksimal antrean paket 1-uplink di TX queue
-MAX_QUEUE_SIZE = 3
+# Simpan 1 snapshot telemetry terbaru di TX queue agar tidak mengirim burst beruntun
+MAX_QUEUE_SIZE = 1
 
 # Folder log komunikasi LoRa lokal di Raspberry Pi
 DEFAULT_COMM_LOG_DIR = os.path.expanduser(
@@ -680,6 +680,7 @@ class LoRaTransmitterNode(Node):
         self.declare_parameter("mannequin_id", auto_mid)
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "packed")
+        self.declare_parameter("transmit_interval", TRANSMIT_INTERVAL)
         self.declare_parameter("log_enabled", True)
         self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
 
@@ -689,6 +690,9 @@ class LoRaTransmitterNode(Node):
         self._mannequin_id_source = mid_source
         self.boot_count = int(self.get_parameter("boot_count").value)
         self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
+        self.transmit_interval = max(
+            0.2, float(self.get_parameter("transmit_interval").value)
+        )
         self.log_enabled = bool(self.get_parameter("log_enabled").value)
         self.log_dir = os.path.expanduser(
             str(self.get_parameter("log_dir").value)
@@ -713,8 +717,10 @@ class LoRaTransmitterNode(Node):
         self.transmitted_count = 0
         self.failed_count = 0
         self._last_single_uplink_warn = 0.0
-        # Stagger fase TX agar M1 (+0.0s) dan M2 (+0.45s) tidak terus bertabrakan di 1 RX
-        initial_offset = 0.45 if (self.mannequin_id % 2 == 0) else 0.0
+        # Stagger fase TX agar M1 (+0.0s) dan M2 (+setengah interval) tidak bertabrakan di 1 RX
+        initial_offset = (
+            (self.transmit_interval * 0.5) if (self.mannequin_id % 2 == 0) else 0.0
+        )
         self._next_telemetry_at = time.monotonic() + initial_offset
 
         self.received_sources = set()
@@ -841,8 +847,9 @@ class LoRaTransmitterNode(Node):
         self.get_logger().info(
             f"LoRa node initialized | "
             f"mannequin_id={self.mannequin_id} ({self._mannequin_id_source}) | "
+            f"Freq:{FREQUENCY} SF{SPREADING_FACTOR} BW{BANDWIDTH} CR{CODING_RATE} Pwr:{TX_POWER}dBm | "
             f"Fields: {len(EXPECTED_KEYS)} | "
-            f"Interval: {TRANSMIT_INTERVAL}s"
+            f"Interval: {self.transmit_interval}s"
         )
 
     # ========================================================
@@ -1121,7 +1128,7 @@ class LoRaTransmitterNode(Node):
         self.rak_ready = False
         self.get_logger().info(
             f"Configuring RAK P2P on {SERIAL_PORT} "
-            f"({FREQUENCY} Hz, SF{SPREADING_FACTOR})..."
+            f"({FREQUENCY} Hz, SF{SPREADING_FACTOR}, BW{BANDWIDTH}, CR{CODING_RATE}, Pwr{TX_POWER})..."
         )
 
         for command in commands:
@@ -1136,6 +1143,18 @@ class LoRaTransmitterNode(Node):
                         f"Retry AT command {attempt + 1}/3: {command}"
                     )
                     time.sleep(0.5)
+
+            if not success and command.startswith("AT+P2P="):
+                bw_fallback = {0: 125, 1: 250, 2: 500}.get(BANDWIDTH)
+                if bw_fallback is not None:
+                    fallback_cmd = (
+                        f"AT+P2P={FREQUENCY}:{SPREADING_FACTOR}:{bw_fallback}:"
+                        f"{CODING_RATE}:{PREAMBLE}:{TX_POWER}"
+                    )
+                    self.get_logger().warning(
+                        f"Fallback P2P command (kHz): {fallback_cmd}"
+                    )
+                    success = self.send_at(fallback_cmd, timeout=3.0)
 
             if not success:
                 self.get_logger().error(
@@ -1829,7 +1848,7 @@ class LoRaTransmitterNode(Node):
             if not self.latest_values:
                 return
 
-        self._next_telemetry_at = now + TRANSMIT_INTERVAL + random.uniform(-0.04, 0.04)
+        self._next_telemetry_at = now + self.transmit_interval + random.uniform(-0.12, 0.12)
 
         try:
 
@@ -1908,7 +1927,7 @@ class LoRaTransmitterNode(Node):
 
             self.serial_port.flush()
 
-            success = self.wait_tx_done(timeout=2.0)
+            success = self.wait_tx_done(timeout=4.0)
             tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
             if success:
@@ -1968,7 +1987,7 @@ class LoRaTransmitterNode(Node):
     # WAIT TRANSMISSION CONFIRMATION
     # ========================================================
 
-    def wait_tx_done(self, timeout=2.0):
+    def wait_tx_done(self, timeout=4.0):
 
         start = time.monotonic()
 
