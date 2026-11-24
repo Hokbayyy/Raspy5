@@ -38,7 +38,12 @@ CODING_RATE = 3
 PREAMBLE = 8
 TX_POWER = 22
 CAD_ENABLED = True
-CAD_MAX_RETRIES = 3
+CAD_MAX_RETRIES = 4
+CAD_BACKOFF_MIN_SEC = 0.25
+CAD_BACKOFF_MAX_SEC = 0.55
+TX_CONSECUTIVE_FAIL_RESET_THRESHOLD = 3
+TX_CAD_BUSY_RESET_THRESHOLD = 6
+RAK_RESET_COOLDOWN_SEC = 10.0
 
 # Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz/CR4-8 & anti-tabrakan M1/M2
 TRANSMIT_INTERVAL = 2.5
@@ -720,9 +725,16 @@ class LoRaTransmitterNode(Node):
         self.tx_active = False
         self.rak_ready = False
         self.rak_retry_interval = 10.0
+        self._serial_lock = threading.Lock()
+        self._closing = False
+        self._reset_in_progress = False
+        self._last_reset_at = 0.0
 
         self.transmitted_count = 0
         self.failed_count = 0
+        self.consecutive_tx_failures = 0
+        self.consecutive_cad_busy = 0
+        self.soft_reset_count = 0
         self._last_single_uplink_warn = 0.0
         # Stagger fase TX agar M1 (+0.0s) dan M2 (+setengah interval) tidak bertabrakan di 1 RX
         initial_offset = (
@@ -1031,37 +1043,114 @@ class LoRaTransmitterNode(Node):
     # SERIAL INITIALIZATION
     # ========================================================
 
+    def _close_serial_port(self):
+        if self.serial_port is not None:
+            try:
+                if self.serial_port.is_open:
+                    self.serial_port.close()
+            except Exception:
+                pass
+            self.serial_port = None
+
     def initialize_serial(self):
         """Open UART3 and configure the RAK. Failure does not stop ROS."""
-        try:
-            if self.serial_port is None or not self.serial_port.is_open:
-                self.serial_port = serial.Serial(
-                    port=SERIAL_PORT,
-                    baudrate=BAUD_RATE,
-                    timeout=0.1,
-                    write_timeout=1
-                )
-                # Give the UART/module time to settle after opening.
-                time.sleep(1.0)
-                self.get_logger().info(
-                    f"UART opened: {SERIAL_PORT} @ {BAUD_RATE} baud"
-                )
+        with self._serial_lock:
+            try:
+                if self.serial_port is None or not self.serial_port.is_open:
+                    self.serial_port = serial.Serial(
+                        port=SERIAL_PORT,
+                        baudrate=BAUD_RATE,
+                        timeout=0.1,
+                        write_timeout=1
+                    )
+                    # Give the UART/module time to settle after opening.
+                    time.sleep(1.0)
+                    self.get_logger().info(
+                        f"UART opened: {SERIAL_PORT} @ {BAUD_RATE} baud"
+                    )
 
-            self.serial_port.reset_input_buffer()
-            self.serial_port.reset_output_buffer()
-            self.rak_ready = self.configure_rak()
-            return self.rak_ready
+                self.serial_port.reset_input_buffer()
+                self.serial_port.reset_output_buffer()
+                self.rak_ready = self.configure_rak()
+                return self.rak_ready
 
-        except Exception as error:
-            self.rak_ready = False
-            self.get_logger().error(
-                f"RAK UART initialization failed: {error}"
-            )
+            except Exception as error:
+                self.rak_ready = False
+                self._close_serial_port()
+                self.get_logger().error(
+                    f"RAK UART initialization failed: {error}"
+                )
+                return False
+
+    def trigger_rak_recovery(self, reason: str) -> bool:
+        """Memicu soft-reset ATZ + re-init serial di background thread tanpa memblokir ROS."""
+        now = time.monotonic()
+        if self._closing or self._reset_in_progress:
             return False
+        if (now - self._last_reset_at) < RAK_RESET_COOLDOWN_SEC:
+            return False
+
+        self._reset_in_progress = True
+        self._last_reset_at = now
+        self.rak_ready = False
+        self.consecutive_tx_failures = 0
+        self.consecutive_cad_busy = 0
+        self.soft_reset_count += 1
+        with self.lock:
+            self.tx_queue.clear()
+
+        self.get_logger().warning(
+            f"Memicu auto-refresh RAK3272S (#{self.soft_reset_count}, alasan={reason}): "
+            "kirim ATZ & re-init serial..."
+        )
+        worker = threading.Thread(
+            target=self._soft_reset_worker,
+            args=(reason,),
+            name="rak_soft_reset",
+            daemon=True,
+        )
+        worker.start()
+        return True
+
+    def _soft_reset_worker(self, reason: str) -> None:
+        try:
+            with self._serial_lock:
+                if self.serial_port is not None and self.serial_port.is_open:
+                    try:
+                        self.serial_port.write(b"AT+PRECV=0\r\n")
+                        self.serial_port.flush()
+                        time.sleep(0.05)
+                        self.serial_port.write(b"ATZ\r\n")
+                        self.serial_port.flush()
+                    except Exception as exc:
+                        self.get_logger().warning(f"ATZ write dilewati ({exc})")
+
+            # Tunggu chip STM32WLE5/RAK3272S selesai reboot sebelum buka serial ulang
+            deadline = time.monotonic() + 1.8
+            while not self._closing and time.monotonic() < deadline:
+                time.sleep(0.1)
+
+            if self._closing:
+                return
+
+            with self._serial_lock:
+                self._close_serial_port()
+
+            ok = self.initialize_serial()
+            if ok:
+                self.get_logger().info(
+                    f"Auto-refresh RAK3272S (#{self.soft_reset_count}, {reason}) berhasil; TX aktif kembali."
+                )
+            else:
+                self.get_logger().warning(
+                    f"Auto-refresh RAK3272S (#{self.soft_reset_count}) belum siap; akan dicoba ulang oleh timer."
+                )
+        finally:
+            self._reset_in_progress = False
 
     def retry_rak_connection(self):
         """Retry configuration periodically without blocking sensor nodes."""
-        if self.rak_ready:
+        if self.rak_ready or self._reset_in_progress or self._closing:
             return
         self.get_logger().warning(
             f"RAK not ready; retrying {SERIAL_PORT} initialization..."
@@ -1943,6 +2032,8 @@ class LoRaTransmitterNode(Node):
             if tx_result == "DONE":
 
                 self.transmitted_count += 1
+                self.consecutive_tx_failures = 0
+                self.consecutive_cad_busy = 0
 
                 self.write_local_tx_log(
                     fragment=fragment,
@@ -1974,9 +2065,19 @@ class LoRaTransmitterNode(Node):
                     f"TX failed ({tx_status}): {self.failed_count}"
                 )
 
+                if tx_result == "BUSY":
+                    self.consecutive_cad_busy += 1
+                    if self.consecutive_cad_busy >= TX_CAD_BUSY_RESET_THRESHOLD:
+                        self.trigger_rak_recovery("cad_busy_beruntun")
+                else:
+                    self.consecutive_tx_failures += 1
+                    if self.consecutive_tx_failures >= TX_CONSECUTIVE_FAIL_RESET_THRESHOLD:
+                        self.trigger_rak_recovery(f"{tx_result.lower()}_beruntun")
+
         except Exception as error:
 
             self.failed_count += 1
+            self.consecutive_tx_failures += 1
             tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
             self.write_local_tx_log(
@@ -1989,6 +2090,10 @@ class LoRaTransmitterNode(Node):
             self.get_logger().error(
                 f"LoRa TX error: {error}"
             )
+            if isinstance(error, (serial.SerialException, OSError)) or (
+                self.consecutive_tx_failures >= TX_CONSECUTIVE_FAIL_RESET_THRESHOLD
+            ):
+                self.trigger_rak_recovery(f"tx_exception:{type(error).__name__}")
 
         finally:
 
@@ -2007,7 +2112,7 @@ class LoRaTransmitterNode(Node):
             if last_status != "BUSY" or attempt >= max_attempts:
                 return last_status
 
-            backoff_s = random.uniform(0.10, 0.25)
+            backoff_s = random.uniform(CAD_BACKOFF_MIN_SEC, CAD_BACKOFF_MAX_SEC)
             self.get_logger().warning(
                 f"CAD channel sibuk (AT_BUSY_ERROR); retry {attempt}/{CAD_MAX_RETRIES} "
                 f"dalam {backoff_s * 1000:.0f}ms"
@@ -2064,6 +2169,7 @@ class LoRaTransmitterNode(Node):
 
     def destroy_node(self):
 
+        self._closing = True
         self.rak_ready = False
 
         for csv_f in (self.comm_csv_file, self.telemetry_csv_file):
@@ -2074,12 +2180,8 @@ class LoRaTransmitterNode(Node):
                 except Exception:
                     pass
 
-        if self.serial_port is not None:
-
-            try:
-                self.serial_port.close()
-            except Exception:
-                pass
+        with self._serial_lock:
+            self._close_serial_port()
 
         super().destroy_node()
 
