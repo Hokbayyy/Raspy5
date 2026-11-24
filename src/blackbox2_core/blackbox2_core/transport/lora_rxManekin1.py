@@ -2677,6 +2677,19 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         for line in lines:
             parsed = parse_rx_event(line)
             if parsed is None:
+                upper_line = line.upper()
+                if "RXP2P" in upper_line and "ERROR" in upper_line:
+                    self.packet_count += 1
+                    self._log_comm_event(
+                        packet_type="rx_error",
+                        payload_mode="rxp2p_hw_error",
+                        byte_len=0,
+                        fragments=1,
+                        crc_status="HW_CRC_ERROR",
+                    )
+                    self.get_logger().warning(
+                        f"[RX #{self.packet_count:04d}] RAK3272S RXP2P ERROR (sinyal/CRC radio korup di udara): {line}"
+                    )
                 continue
             rssi, snr, hex_str = parsed
             try:
@@ -2692,7 +2705,10 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                     fragments=1,
                     crc_status="HEX_ERROR",
                 )
-                self.get_logger().error(f"Gagal konversi hex: {hex_str[:30]}")
+                self.get_logger().error(
+                    f"[RX #{self.packet_count:04d}] Gagal konversi hex | len={len(hex_str)}ch "
+                    f"rssi={self.last_rssi}dBm snr={self.last_snr}dB head={hex_str[:30]}"
+                )
                 continue
             self.handle_received_bytes(raw_bytes, rssi, snr)
 
@@ -2729,6 +2745,33 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
 
         self.process_complete_data(raw_bytes, total_frags=1, elapsed_ms=0.0)
 
+    def _log_and_warn_crc_error(
+        self,
+        payload_mode: str,
+        exc: Exception,
+        complete_data: bytes,
+        total_frags: int,
+        elapsed_ms: float,
+    ) -> None:
+        self.crc_error_count += 1
+        self._log_comm_event(
+            packet_type="crc_error",
+            payload_mode=payload_mode,
+            byte_len=len(complete_data),
+            fragments=total_frags,
+            reassembly_ms=elapsed_ms,
+            crc_status="CRC_ERROR",
+            crc_hex="MISMATCH",
+        )
+        head_hex = complete_data[:6].hex().upper()
+        tail_hex = complete_data[-4:].hex().upper()
+        self.get_logger().warning(
+            f"[RX #{self.packet_count:04d}] {exc} | "
+            f"len={len(complete_data)}B frags={total_frags} "
+            f"rssi={self.last_rssi}dBm snr={self.last_snr}dB "
+            f"head={head_hex} tail={tail_hex}. Paket dibuang."
+        )
+
     def process_complete_data(
         self, complete_data: bytes, total_frags: int, elapsed_ms: float
     ) -> None:
@@ -2740,18 +2783,8 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
                     decode_pressed_telemetry(complete_data, self.default_mannequin_id)
                 )
             except ValueError as exc:
-                self.crc_error_count += 1
-                self._log_comm_event(
-                    packet_type="crc_error",
-                    payload_mode="invalid_pressed_crc",
-                    byte_len=len(complete_data),
-                    fragments=total_frags,
-                    reassembly_ms=elapsed_ms,
-                    crc_status="CRC_ERROR",
-                    crc_hex="MISMATCH",
-                )
-                self.get_logger().warning(
-                    f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
+                self._log_and_warn_crc_error(
+                    "invalid_pressed_crc", exc, complete_data, total_frags, elapsed_ms
                 )
                 return
 
@@ -2774,18 +2807,8 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
         try:
             payload_bytes, crc_hex = split_and_verify_crc(complete_data)
         except ValueError as exc:
-            self.crc_error_count += 1
-            self._log_comm_event(
-                packet_type="crc_error",
-                payload_mode="invalid_crc",
-                byte_len=len(complete_data),
-                fragments=total_frags,
-                reassembly_ms=elapsed_ms,
-                crc_status="CRC_ERROR",
-                crc_hex="MISMATCH",
-            )
-            self.get_logger().warning(
-                f"[RX #{self.packet_count:04d}] {exc}. Paket dibuang."
+            self._log_and_warn_crc_error(
+                "invalid_crc", exc, complete_data, total_frags, elapsed_ms
             )
             return
 
