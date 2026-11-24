@@ -586,9 +586,12 @@ class LocalCommunicationLogger:
         self.logger = logger
         self._lock = threading.Lock()
 
-        self.comm_csv_path = os.path.join(self.log_dir, "lora_rx_communication.csv")
-        self.telemetry_csv_path = os.path.join(self.log_dir, "lora_rx_telemetry.csv")
-        self.alert_csv_path = os.path.join(self.log_dir, "lora_rx_alerts.csv")
+        (
+            self.session_tag,
+            self.comm_csv_path,
+            self.telemetry_csv_path,
+            self.alert_csv_path,
+        ) = self._allocate_session_paths(self.log_dir)
 
         self._comm_file = None
         self._telemetry_file = None
@@ -601,9 +604,29 @@ class LocalCommunicationLogger:
         if self.enabled:
             self._open_files()
 
+    @staticmethod
+    def _allocate_session_paths(log_dir: str) -> Tuple[str, str, str, str]:
+        """Menghasilkan nama file CSV unik per sesi agar tidak menimpa/menumpuk file lama."""
+        base_tag = datetime.now().strftime("%Y%m%d_%H%M%S")
+        seq = 0
+        while True:
+            tag = base_tag if seq == 0 else f"{base_tag}_{seq:02d}"
+            comm_p = os.path.join(log_dir, f"lora_rx_communication_{tag}.csv")
+            tele_p = os.path.join(log_dir, f"lora_rx_telemetry_{tag}.csv")
+            alert_p = os.path.join(log_dir, f"lora_rx_alerts_{tag}.csv")
+            if not any(os.path.exists(p) for p in (comm_p, tele_p, alert_p)):
+                return tag, comm_p, tele_p, alert_p
+            seq += 1
+
     def _open_files(self) -> None:
         try:
             os.makedirs(self.log_dir, exist_ok=True)
+            (
+                self.session_tag,
+                self.comm_csv_path,
+                self.telemetry_csv_path,
+                self.alert_csv_path,
+            ) = self._allocate_session_paths(self.log_dir)
 
             self._comm_file, self._comm_writer = self._init_csv(
                 self.comm_csv_path, COMMUNICATION_CSV_HEADER
@@ -615,7 +638,8 @@ class LocalCommunicationLogger:
                 self.alert_csv_path, ALERT_CSV_HEADER
             )
             self.logger.info(
-                f"Local LoRa Communication CSV Logger aktif di: {self.log_dir}"
+                f"Local LoRa Communication CSV Logger aktif di: {self.log_dir} "
+                f"(file sesi baru: *{self.session_tag}.csv)"
             )
         except Exception as exc:
             self.enabled = False
@@ -2684,7 +2708,7 @@ class LoRaManekin1ReceiverNode(StandaloneParamStore):
 
         # Logger CSV Lokal (<folder_script>/logs/communication/)
         self.comm_logger = LocalCommunicationLogger(
-            enabled=log_enabled,
+            enabled=log_enabled and not scan_only,
             log_dir=log_dir,
             logger=self.get_logger(),
         )
