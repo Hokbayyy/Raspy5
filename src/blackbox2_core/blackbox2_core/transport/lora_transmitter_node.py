@@ -34,19 +34,12 @@ BAUD_RATE = 115200
 FREQUENCY = 920600000
 SPREADING_FACTOR = 9
 BANDWIDTH = 0
-CODING_RATE = 3
+CODING_RATE = 2
 PREAMBLE = 8
-TX_POWER = 22
-CAD_ENABLED = True
-CAD_MAX_RETRIES = 4
-CAD_BACKOFF_MIN_SEC = 0.25
-CAD_BACKOFF_MAX_SEC = 0.55
-TX_CONSECUTIVE_FAIL_RESET_THRESHOLD = 3
-TX_CAD_BUSY_RESET_THRESHOLD = 6
-RAK_RESET_COOLDOWN_SEC = 10.0
+TX_POWER = 20
 
-# Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz/CR4-8 & anti-tabrakan M1/M2
-TRANSMIT_INTERVAL = 2.5
+# Jeda antar paket telemetry (detik) agar aman di SF9/BW125kHz/CR4-7 & anti-tabrakan M1/M2
+TRANSMIT_INTERVAL = 2.0
 
 # Batas keras payload RAK3272S / RUI3 AT+PSEND = 239 byte (478 hex char).
 # TX wajib mengirim 1 uplink tunggal (<= 238 byte) tanpa dipecah fragmen FRG.
@@ -688,7 +681,6 @@ class LoRaTransmitterNode(Node):
         self.declare_parameter("boot_count", 1)
         self.declare_parameter("payload_mode", "packed")
         self.declare_parameter("freq", FREQUENCY)
-        self.declare_parameter("cad_enabled", CAD_ENABLED)
         self.declare_parameter("transmit_interval", TRANSMIT_INTERVAL)
         self.declare_parameter("log_enabled", True)
         self.declare_parameter("log_dir", DEFAULT_COMM_LOG_DIR)
@@ -700,8 +692,6 @@ class LoRaTransmitterNode(Node):
         self.boot_count = int(self.get_parameter("boot_count").value)
         self.payload_mode = str(self.get_parameter("payload_mode").value).lower()
         self.freq = int(self.get_parameter("freq").value)
-        self.cad_enabled = bool(self.get_parameter("cad_enabled").value)
-        self.cad_active = False
         self.transmit_interval = max(
             0.2, float(self.get_parameter("transmit_interval").value)
         )
@@ -725,16 +715,9 @@ class LoRaTransmitterNode(Node):
         self.tx_active = False
         self.rak_ready = False
         self.rak_retry_interval = 10.0
-        self._serial_lock = threading.Lock()
-        self._closing = False
-        self._reset_in_progress = False
-        self._last_reset_at = 0.0
 
         self.transmitted_count = 0
         self.failed_count = 0
-        self.consecutive_tx_failures = 0
-        self.consecutive_cad_busy = 0
-        self.soft_reset_count = 0
         self._last_single_uplink_warn = 0.0
         # Stagger fase TX agar M1 (+0.0s) dan M2 (+setengah interval) tidak bertabrakan di 1 RX
         initial_offset = (
@@ -867,7 +850,7 @@ class LoRaTransmitterNode(Node):
             f"LoRa node initialized | "
             f"mannequin_id={self.mannequin_id} ({self._mannequin_id_source}) | "
             f"Freq:{self.freq} SF{SPREADING_FACTOR} BW{BANDWIDTH} CR{CODING_RATE} Pwr:{TX_POWER}dBm | "
-            f"CAD:{self.cad_active} | Fields: {len(EXPECTED_KEYS)} | "
+            f"Fields: {len(EXPECTED_KEYS)} | "
             f"Interval: {self.transmit_interval}s"
         )
 
@@ -1043,114 +1026,37 @@ class LoRaTransmitterNode(Node):
     # SERIAL INITIALIZATION
     # ========================================================
 
-    def _close_serial_port(self):
-        if self.serial_port is not None:
-            try:
-                if self.serial_port.is_open:
-                    self.serial_port.close()
-            except Exception:
-                pass
-            self.serial_port = None
-
     def initialize_serial(self):
         """Open UART3 and configure the RAK. Failure does not stop ROS."""
-        with self._serial_lock:
-            try:
-                if self.serial_port is None or not self.serial_port.is_open:
-                    self.serial_port = serial.Serial(
-                        port=SERIAL_PORT,
-                        baudrate=BAUD_RATE,
-                        timeout=0.1,
-                        write_timeout=1
-                    )
-                    # Give the UART/module time to settle after opening.
-                    time.sleep(1.0)
-                    self.get_logger().info(
-                        f"UART opened: {SERIAL_PORT} @ {BAUD_RATE} baud"
-                    )
-
-                self.serial_port.reset_input_buffer()
-                self.serial_port.reset_output_buffer()
-                self.rak_ready = self.configure_rak()
-                return self.rak_ready
-
-            except Exception as error:
-                self.rak_ready = False
-                self._close_serial_port()
-                self.get_logger().error(
-                    f"RAK UART initialization failed: {error}"
-                )
-                return False
-
-    def trigger_rak_recovery(self, reason: str) -> bool:
-        """Memicu soft-reset ATZ + re-init serial di background thread tanpa memblokir ROS."""
-        now = time.monotonic()
-        if self._closing or self._reset_in_progress:
-            return False
-        if (now - self._last_reset_at) < RAK_RESET_COOLDOWN_SEC:
-            return False
-
-        self._reset_in_progress = True
-        self._last_reset_at = now
-        self.rak_ready = False
-        self.consecutive_tx_failures = 0
-        self.consecutive_cad_busy = 0
-        self.soft_reset_count += 1
-        with self.lock:
-            self.tx_queue.clear()
-
-        self.get_logger().warning(
-            f"Memicu auto-refresh RAK3272S (#{self.soft_reset_count}, alasan={reason}): "
-            "kirim ATZ & re-init serial..."
-        )
-        worker = threading.Thread(
-            target=self._soft_reset_worker,
-            args=(reason,),
-            name="rak_soft_reset",
-            daemon=True,
-        )
-        worker.start()
-        return True
-
-    def _soft_reset_worker(self, reason: str) -> None:
         try:
-            with self._serial_lock:
-                if self.serial_port is not None and self.serial_port.is_open:
-                    try:
-                        self.serial_port.write(b"AT+PRECV=0\r\n")
-                        self.serial_port.flush()
-                        time.sleep(0.05)
-                        self.serial_port.write(b"ATZ\r\n")
-                        self.serial_port.flush()
-                    except Exception as exc:
-                        self.get_logger().warning(f"ATZ write dilewati ({exc})")
-
-            # Tunggu chip STM32WLE5/RAK3272S selesai reboot sebelum buka serial ulang
-            deadline = time.monotonic() + 1.8
-            while not self._closing and time.monotonic() < deadline:
-                time.sleep(0.1)
-
-            if self._closing:
-                return
-
-            with self._serial_lock:
-                self._close_serial_port()
-
-            ok = self.initialize_serial()
-            if ok:
+            if self.serial_port is None or not self.serial_port.is_open:
+                self.serial_port = serial.Serial(
+                    port=SERIAL_PORT,
+                    baudrate=BAUD_RATE,
+                    timeout=0.1,
+                    write_timeout=1
+                )
+                # Give the UART/module time to settle after opening.
+                time.sleep(1.0)
                 self.get_logger().info(
-                    f"Auto-refresh RAK3272S (#{self.soft_reset_count}, {reason}) berhasil; TX aktif kembali."
+                    f"UART opened: {SERIAL_PORT} @ {BAUD_RATE} baud"
                 )
-            else:
-                self.get_logger().warning(
-                    f"Auto-refresh RAK3272S (#{self.soft_reset_count}) belum siap; akan dicoba ulang oleh timer."
-                )
-        finally:
-            self._reset_in_progress = False
+
+            self.serial_port.reset_input_buffer()
+            self.serial_port.reset_output_buffer()
+            self.rak_ready = self.configure_rak()
+            return self.rak_ready
+
+        except Exception as error:
+            self.rak_ready = False
+            self.get_logger().error(
+                f"RAK UART initialization failed: {error}"
+            )
+            return False
 
     def retry_rak_connection(self):
         """Retry configuration periodically without blocking sensor nodes."""
-        if self.rak_ready or self._reset_in_progress or self._closing:
+        if self.rak_ready:
             return
         self.get_logger().warning(
             f"RAK not ready; retrying {SERIAL_PORT} initialization..."
@@ -1202,14 +1108,45 @@ class LoRaTransmitterNode(Node):
     # CONFIGURE RAK
     # ========================================================
 
+    def _ensure_p2p_mode(self):
+        """Hanya pindah ke AT+NWM=0 bila belum P2P, supaya modul tidak reboot berulang."""
+        try:
+            self.serial_port.reset_input_buffer()
+            self.serial_port.write(b"AT+NWM=?\r\n")
+            self.serial_port.flush()
+            time.sleep(0.3)
+            res_nwm = self.serial_port.read_all().decode(errors="ignore")
+            if "=0" in res_nwm:
+                return True
+        except Exception:
+            pass
+
+        self.get_logger().info("Mengubah RAK ke mode LoRa P2P (AT+NWM=0)...")
+        if not self.send_at("AT+NWM=0", timeout=3.0):
+            return False
+        time.sleep(2.0)
+        return self.send_at("AT", timeout=2.0)
+
     def configure_rak(self):
         if self.serial_port is None or not self.serial_port.is_open:
             self.rak_ready = False
             return False
 
+        self.rak_ready = False
+        self.get_logger().info(
+            f"Configuring RAK P2P on {SERIAL_PORT} "
+            f"({self.freq} Hz, SF{SPREADING_FACTOR}, BW{BANDWIDTH}, CR{CODING_RATE}, Pwr{TX_POWER})..."
+        )
+
+        if not self.send_at("AT", timeout=3.0):
+            self.get_logger().error("RAK configuration failed at: AT; TX is disabled until configuration succeeds")
+            return False
+
+        if not self._ensure_p2p_mode():
+            self.get_logger().error("RAK configuration failed at: AT+NWM=0; TX is disabled until configuration succeeds")
+            return False
+
         commands = [
-            "AT",
-            "AT+NWM=0",
             "AT+PRECV=0",
             (
                 f"AT+P2P={self.freq}:"
@@ -1220,13 +1157,6 @@ class LoRaTransmitterNode(Node):
                 f"{TX_POWER}"
             ),
         ]
-
-        self.rak_ready = False
-        self.cad_active = False
-        self.get_logger().info(
-            f"Configuring RAK P2P on {SERIAL_PORT} "
-            f"({self.freq} Hz, SF{SPREADING_FACTOR}, BW{BANDWIDTH}, CR{CODING_RATE}, Pwr{TX_POWER})..."
-        )
 
         for command in commands:
             success = False
@@ -1262,16 +1192,6 @@ class LoRaTransmitterNode(Node):
                 return False
 
             time.sleep(0.25)
-
-        if self.cad_enabled:
-            if self.send_at("AT+CAD=1", timeout=1.5):
-                self.cad_active = True
-                self.get_logger().info("CAD (Listen-Before-Talk) aktif: AT+CAD=1")
-            else:
-                self.cad_active = False
-                self.get_logger().warning(
-                    "AT+CAD=1 tidak didukung firmware modul; lanjut TX tanpa CAD."
-                )
 
         self.rak_ready = True
         self.get_logger().info(
@@ -2026,14 +1946,16 @@ class LoRaTransmitterNode(Node):
                 f"AT command: {len(command)} chars"
             )
 
-            tx_result = self._send_p2p_with_cad_retry(command)
+            self.serial_port.reset_input_buffer()
+            self.serial_port.write((command + "\r\n").encode("ascii"))
+            self.serial_port.flush()
+
+            success = self.wait_tx_done(timeout=4.0)
             tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
-            if tx_result == "DONE":
+            if success:
 
                 self.transmitted_count += 1
-                self.consecutive_tx_failures = 0
-                self.consecutive_cad_busy = 0
 
                 self.write_local_tx_log(
                     fragment=fragment,
@@ -2052,32 +1974,21 @@ class LoRaTransmitterNode(Node):
             else:
 
                 self.failed_count += 1
-                tx_status = "CAD_BUSY" if tx_result == "BUSY" else "FAILED"
 
                 self.write_local_tx_log(
                     fragment=fragment,
                     packet_type=packet_type,
-                    tx_status=tx_status,
+                    tx_status="FAILED",
                     tx_duration_ms=tx_duration_ms
                 )
 
                 self.get_logger().warning(
-                    f"TX failed ({tx_status}): {self.failed_count}"
+                    f"TX failed: {self.failed_count}"
                 )
-
-                if tx_result == "BUSY":
-                    self.consecutive_cad_busy += 1
-                    if self.consecutive_cad_busy >= TX_CAD_BUSY_RESET_THRESHOLD:
-                        self.trigger_rak_recovery("cad_busy_beruntun")
-                else:
-                    self.consecutive_tx_failures += 1
-                    if self.consecutive_tx_failures >= TX_CONSECUTIVE_FAIL_RESET_THRESHOLD:
-                        self.trigger_rak_recovery(f"{tx_result.lower()}_beruntun")
 
         except Exception as error:
 
             self.failed_count += 1
-            self.consecutive_tx_failures += 1
             tx_duration_ms = (time.monotonic() - tx_start) * 1000.0
 
             self.write_local_tx_log(
@@ -2090,41 +2001,16 @@ class LoRaTransmitterNode(Node):
             self.get_logger().error(
                 f"LoRa TX error: {error}"
             )
-            if isinstance(error, (serial.SerialException, OSError)) or (
-                self.consecutive_tx_failures >= TX_CONSECUTIVE_FAIL_RESET_THRESHOLD
-            ):
-                self.trigger_rak_recovery(f"tx_exception:{type(error).__name__}")
 
         finally:
 
             self.tx_active = False
 
-    def _send_p2p_with_cad_retry(self, command: str) -> str:
-        """Mengirim AT+PSEND dengan retry backoff singkat bila CAD mendeteksi channel sibuk."""
-        max_attempts = 1 + (CAD_MAX_RETRIES if self.cad_enabled else 0)
-        last_status = "ERROR"
-        for attempt in range(1, max_attempts + 1):
-            self.serial_port.reset_input_buffer()
-            self.serial_port.write((command + "\r\n").encode("ascii"))
-            self.serial_port.flush()
-
-            last_status = self.wait_tx_done(timeout=4.5)
-            if last_status != "BUSY" or attempt >= max_attempts:
-                return last_status
-
-            backoff_s = random.uniform(CAD_BACKOFF_MIN_SEC, CAD_BACKOFF_MAX_SEC)
-            self.get_logger().warning(
-                f"CAD channel sibuk (AT_BUSY_ERROR); retry {attempt}/{CAD_MAX_RETRIES} "
-                f"dalam {backoff_s * 1000:.0f}ms"
-            )
-            time.sleep(backoff_s)
-        return last_status
-
     # ========================================================
     # WAIT TRANSMISSION CONFIRMATION
     # ========================================================
 
-    def wait_tx_done(self, timeout=4.5) -> str:
+    def wait_tx_done(self, timeout=4.0):
 
         start = time.monotonic()
 
@@ -2141,19 +2027,15 @@ class LoRaTransmitterNode(Node):
                 response += data.decode(
                     errors="ignore"
                 )
-                upper_resp = response.upper()
 
-                if "+EVT:TXP2P DONE" in upper_resp:
-                    return "DONE"
+                if "+EVT:TXP2P DONE" in response:
+                    return True
 
-                if "AT_BUSY_ERROR" in upper_resp:
-                    return "BUSY"
-
-                if "ERROR" in upper_resp:
+                if "ERROR" in response:
                     self.get_logger().error(
                         response.strip()
                     )
-                    return "ERROR"
+                    return False
 
             time.sleep(0.02)
 
@@ -2161,7 +2043,7 @@ class LoRaTransmitterNode(Node):
             f"TX confirmation timeout: {response.strip()}"
         )
 
-        return "TIMEOUT"
+        return False
 
     # ========================================================
     # SHUTDOWN
@@ -2169,7 +2051,6 @@ class LoRaTransmitterNode(Node):
 
     def destroy_node(self):
 
-        self._closing = True
         self.rak_ready = False
 
         for csv_f in (self.comm_csv_file, self.telemetry_csv_file):
@@ -2180,8 +2061,11 @@ class LoRaTransmitterNode(Node):
                 except Exception:
                     pass
 
-        with self._serial_lock:
-            self._close_serial_port()
+        if self.serial_port is not None:
+            try:
+                self.serial_port.close()
+            except Exception:
+                pass
 
         super().destroy_node()
 
